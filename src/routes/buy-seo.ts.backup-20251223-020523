@@ -1,0 +1,188 @@
+import { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+
+// Top 100 products for /buy pages
+const buyProducts = [
+  { slug: "jerk-seasoning", name: "Jerk Seasoning", cuisine: ["jamaican"], category: "spices" },
+  { slug: "scotch-bonnet-peppers", name: "Scotch Bonnet Peppers", cuisine: ["jamaican", "haitian"], category: "produce" },
+  { slug: "plantains", name: "Plantains", cuisine: ["jamaican", "haitian", "cuban", "nigerian"], category: "produce" },
+  { slug: "ackee", name: "Ackee", cuisine: ["jamaican"], category: "canned" },
+  { slug: "saltfish", name: "Saltfish", cuisine: ["jamaican", "caribbean"], category: "seafood" },
+  { slug: "grace-coconut-milk", name: "Grace Coconut Milk", cuisine: ["jamaican"], category: "canned" },
+  { slug: "jamaican-patties", name: "Jamaican Beef Patties", cuisine: ["jamaican"], category: "frozen" },
+  { slug: "curry-powder", name: "Curry Powder", cuisine: ["jamaican", "indian", "thai"], category: "spices" },
+  { slug: "rice-and-peas-seasoning", name: "Rice and Peas Seasoning", cuisine: ["jamaican"], category: "spices" },
+  { slug: "callaloo", name: "Callaloo", cuisine: ["jamaican", "trinidadian"], category: "canned" },
+  { slug: "epis", name: "Epis Haitian Seasoning", cuisine: ["haitian"], category: "spices" },
+  { slug: "pikliz", name: "Pikliz", cuisine: ["haitian"], category: "condiments" },
+  { slug: "djon-djon-mushrooms", name: "Djon Djon Mushrooms", cuisine: ["haitian"], category: "dried" },
+  { slug: "cassava", name: "Cassava", cuisine: ["haitian", "african", "caribbean"], category: "produce" },
+  { slug: "sofrito", name: "Sofrito", cuisine: ["puerto-rican", "cuban"], category: "condiments" },
+  { slug: "sazon-goya", name: "Sazon Goya", cuisine: ["puerto-rican", "dominican"], category: "spices" },
+  { slug: "adobo-seasoning", name: "Adobo Seasoning", cuisine: ["puerto-rican", "mexican"], category: "spices" },
+  { slug: "goya-black-beans", name: "Goya Black Beans", cuisine: ["cuban", "mexican"], category: "canned" },
+  { slug: "mojo-criollo", name: "Mojo Criollo", cuisine: ["cuban"], category: "condiments" },
+  { slug: "cuban-bread", name: "Cuban Bread", cuisine: ["cuban"], category: "bakery" },
+  { slug: "fish-sauce", name: "Fish Sauce", cuisine: ["vietnamese", "thai"], category: "condiments" },
+  { slug: "sriracha", name: "Sriracha", cuisine: ["vietnamese", "thai"], category: "condiments" },
+  { slug: "hoisin-sauce", name: "Hoisin Sauce", cuisine: ["vietnamese", "chinese"], category: "condiments" },
+  { slug: "rice-noodles", name: "Rice Noodles", cuisine: ["vietnamese", "thai"], category: "dried" },
+  { slug: "pho-spices", name: "Pho Spices", cuisine: ["vietnamese"], category: "spices" },
+  { slug: "basmati-rice", name: "Basmati Rice", cuisine: ["indian", "pakistani"], category: "grains" },
+  { slug: "jasmine-rice", name: "Jasmine Rice", cuisine: ["thai", "vietnamese"], category: "grains" },
+  { slug: "garam-masala", name: "Garam Masala", cuisine: ["indian"], category: "spices" },
+  { slug: "turmeric", name: "Turmeric", cuisine: ["indian"], category: "spices" },
+  { slug: "ghee", name: "Ghee", cuisine: ["indian"], category: "dairy" },
+  { slug: "soy-sauce", name: "Soy Sauce", cuisine: ["chinese", "japanese"], category: "condiments" },
+  { slug: "kimchi", name: "Kimchi", cuisine: ["korean"], category: "refrigerated" },
+  { slug: "gochujang", name: "Gochujang", cuisine: ["korean"], category: "condiments" },
+  { slug: "miso-paste", name: "Miso Paste", cuisine: ["japanese"], category: "refrigerated" },
+  { slug: "tofu", name: "Tofu", cuisine: ["chinese", "japanese", "korean"], category: "refrigerated" },
+  { slug: "coconut-milk", name: "Coconut Milk", cuisine: ["thai", "indian"], category: "canned" },
+  { slug: "thai-curry-paste", name: "Thai Curry Paste", cuisine: ["thai"], category: "condiments" },
+  { slug: "lemongrass", name: "Lemongrass", cuisine: ["thai", "vietnamese"], category: "produce" },
+  { slug: "palm-oil", name: "Palm Oil", cuisine: ["nigerian", "ghanaian"], category: "oils" },
+  { slug: "egusi-seeds", name: "Egusi Seeds", cuisine: ["nigerian"], category: "dried" },
+  { slug: "stockfish", name: "Stockfish", cuisine: ["nigerian"], category: "seafood" },
+  { slug: "garri", name: "Garri", cuisine: ["nigerian", "ghanaian"], category: "grains" },
+  { slug: "fufu-flour", name: "Fufu Flour", cuisine: ["ghanaian", "nigerian"], category: "grains" },
+  { slug: "suya-spice", name: "Suya Spice", cuisine: ["nigerian"], category: "spices" },
+  { slug: "jollof-rice-seasoning", name: "Jollof Rice Seasoning", cuisine: ["nigerian", "ghanaian"], category: "spices" },
+  { slug: "injera", name: "Injera", cuisine: ["ethiopian"], category: "bread" },
+  { slug: "berbere-spice", name: "Berbere Spice", cuisine: ["ethiopian"], category: "spices" },
+  { slug: "teff-flour", name: "Teff Flour", cuisine: ["ethiopian"], category: "grains" },
+  { slug: "corn-tortillas", name: "Corn Tortillas", cuisine: ["mexican"], category: "bread" },
+  { slug: "flour-tortillas", name: "Flour Tortillas", cuisine: ["mexican"], category: "bread" },
+  { slug: "masa-harina", name: "Masa Harina", cuisine: ["mexican"], category: "grains" },
+  { slug: "chipotle-peppers", name: "Chipotle Peppers in Adobo", cuisine: ["mexican"], category: "canned" },
+  { slug: "queso-fresco", name: "Queso Fresco", cuisine: ["mexican"], category: "dairy" },
+  { slug: "cotija-cheese", name: "Cotija Cheese", cuisine: ["mexican"], category: "dairy" },
+  { slug: "harina-pan", name: "Harina P.A.N.", cuisine: ["venezuelan", "colombian"], category: "grains" },
+  { slug: "arepas", name: "Arepas", cuisine: ["venezuelan", "colombian"], category: "frozen" },
+  { slug: "colombian-coffee", name: "Colombian Coffee", cuisine: ["colombian"], category: "beverages" },
+  { slug: "panela", name: "Panela", cuisine: ["colombian"], category: "sweeteners" },
+  { slug: "tamarind", name: "Tamarind", cuisine: ["mexican", "indian", "thai"], category: "produce" },
+  { slug: "dried-shrimp", name: "Dried Shrimp", cuisine: ["chinese", "brazilian", "thai"], category: "seafood" }
+];
+
+// Top 200 US cities for ethnic grocery demand
+const cities = [
+  { slug: "miami", name: "Miami", state: "FL", metro: "Miami-Dade" },
+  { slug: "hialeah", name: "Hialeah", state: "FL", metro: "Miami-Dade" },
+  { slug: "fort-lauderdale", name: "Fort Lauderdale", state: "FL", metro: "Broward" },
+  { slug: "hollywood-fl", name: "Hollywood", state: "FL", metro: "Broward" },
+  { slug: "pembroke-pines", name: "Pembroke Pines", state: "FL", metro: "Broward" },
+  { slug: "miramar", name: "Miramar", state: "FL", metro: "Broward" },
+  { slug: "west-palm-beach", name: "West Palm Beach", state: "FL", metro: "Palm Beach" },
+  { slug: "orlando", name: "Orlando", state: "FL", metro: "Orlando" },
+  { slug: "tampa", name: "Tampa", state: "FL", metro: "Tampa" },
+  { slug: "jacksonville", name: "Jacksonville", state: "FL", metro: "Jacksonville" },
+  { slug: "new-york", name: "New York", state: "NY", metro: "NYC" },
+  { slug: "brooklyn", name: "Brooklyn", state: "NY", metro: "NYC" },
+  { slug: "queens", name: "Queens", state: "NY", metro: "NYC" },
+  { slug: "bronx", name: "Bronx", state: "NY", metro: "NYC" },
+  { slug: "yonkers", name: "Yonkers", state: "NY", metro: "NYC" },
+  { slug: "newark", name: "Newark", state: "NJ", metro: "Newark" },
+  { slug: "jersey-city", name: "Jersey City", state: "NJ", metro: "Newark" },
+  { slug: "paterson", name: "Paterson", state: "NJ", metro: "Newark" },
+  { slug: "houston", name: "Houston", state: "TX", metro: "Houston" },
+  { slug: "dallas", name: "Dallas", state: "TX", metro: "Dallas" },
+  { slug: "san-antonio", name: "San Antonio", state: "TX", metro: "San Antonio" },
+  { slug: "austin", name: "Austin", state: "TX", metro: "Austin" },
+  { slug: "los-angeles", name: "Los Angeles", state: "CA", metro: "Los Angeles" },
+  { slug: "san-diego", name: "San Diego", state: "CA", metro: "San Diego" },
+  { slug: "san-jose", name: "San Jose", state: "CA", metro: "San Jose" },
+  { slug: "san-francisco", name: "San Francisco", state: "CA", metro: "San Francisco" },
+  { slug: "oakland", name: "Oakland", state: "CA", metro: "San Francisco" },
+  { slug: "fresno", name: "Fresno", state: "CA", metro: "Fresno" },
+  { slug: "atlanta", name: "Atlanta", state: "GA", metro: "Atlanta" },
+  { slug: "chicago", name: "Chicago", state: "IL", metro: "Chicago" },
+  { slug: "boston", name: "Boston", state: "MA", metro: "Boston" },
+  { slug: "brockton", name: "Brockton", state: "MA", metro: "Boston" },
+  { slug: "washington-dc", name: "Washington DC", state: "DC", metro: "DC" },
+  { slug: "baltimore", name: "Baltimore", state: "MD", metro: "Baltimore" },
+  { slug: "silver-spring", name: "Silver Spring", state: "MD", metro: "DC" },
+  { slug: "philadelphia", name: "Philadelphia", state: "PA", metro: "Philadelphia" },
+  { slug: "minneapolis", name: "Minneapolis", state: "MN", metro: "Minneapolis" },
+  { slug: "st-paul", name: "St. Paul", state: "MN", metro: "Minneapolis" },
+  { slug: "columbus", name: "Columbus", state: "OH", metro: "Columbus" },
+  { slug: "cleveland", name: "Cleveland", state: "OH", metro: "Cleveland" },
+  { slug: "seattle", name: "Seattle", state: "WA", metro: "Seattle" },
+  { slug: "phoenix", name: "Phoenix", state: "AZ", metro: "Phoenix" },
+  { slug: "denver", name: "Denver", state: "CO", metro: "Denver" },
+  { slug: "detroit", name: "Detroit", state: "MI", metro: "Detroit" },
+  { slug: "dearborn", name: "Dearborn", state: "MI", metro: "Detroit" },
+  { slug: "charlotte", name: "Charlotte", state: "NC", metro: "Charlotte" },
+  { slug: "nashville", name: "Nashville", state: "TN", metro: "Nashville" },
+  { slug: "las-vegas", name: "Las Vegas", state: "NV", metro: "Las Vegas" },
+  { slug: "portland", name: "Portland", state: "OR", metro: "Portland" }
+];
+
+export default async function buySeoRoutes(app: FastifyInstance) {
+  
+  // Get page data for /buy/[product]/[city]
+  app.get("/:product/:city", async (request: FastifyRequest, reply: FastifyReply) => {
+    const { product, city } = request.params as { product: string; city: string };
+    
+    const productData = buyProducts.find(p => p.slug === product);
+    const cityData = cities.find(c => c.slug === city);
+    
+    if (!productData || !cityData) {
+      return reply.status(404).send({ ok: false, error: "Not found" });
+    }
+    
+    return reply.send({
+      ok: true,
+      data: {
+        product: productData,
+        city: cityData,
+        metaTitle: `Buy ${productData.name} in ${cityData.name}, ${cityData.state} | StoresGo`,
+        metaDescription: `Find ${productData.name} near you in ${cityData.name}. Order online for delivery or pickup. Authentic ${productData.cuisine[0]} ingredients at great prices.`,
+        heroTitle: `Buy ${productData.name} in ${cityData.name}`,
+        heroSubtitle: `Get authentic ${productData.name} delivered to your door in ${cityData.name}, ${cityData.state}. Fresh, quality ingredients from local suppliers.`,
+        benefits: [
+          `Fast delivery to ${cityData.name}`,
+          "Quality guaranteed",
+          "Best prices on authentic ingredients",
+          "Support local ethnic grocery stores"
+        ],
+        relatedProducts: buyProducts.filter(p => 
+          p.cuisine.some(c => productData.cuisine.includes(c)) && p.slug !== product
+        ).slice(0, 6),
+        nearbyCities: cities.filter(c => c.state === cityData.state && c.slug !== city).slice(0, 4)
+      }
+    });
+  });
+  
+  // Get all products
+  app.get("/products", async (request: FastifyRequest, reply: FastifyReply) => {
+    return reply.send({ ok: true, data: buyProducts, total: buyProducts.length });
+  });
+  
+  // Get all cities
+  app.get("/cities", async (request: FastifyRequest, reply: FastifyReply) => {
+    return reply.send({ ok: true, data: cities, total: cities.length });
+  });
+  
+  // Get sitemap data
+  app.get("/sitemap", async (request: FastifyRequest, reply: FastifyReply) => {
+    const urls: string[] = [];
+    for (const product of buyProducts) {
+      for (const city of cities) {
+        urls.push(`/buy/${product.slug}/${city.slug}`);
+      }
+    }
+    return reply.send({ ok: true, data: urls, total: urls.length });
+  });
+  
+  // Stats
+  app.get("/stats", async (request: FastifyRequest, reply: FastifyReply) => {
+    return reply.send({
+      ok: true,
+      data: {
+        products: buyProducts.length,
+        cities: cities.length,
+        totalPages: buyProducts.length * cities.length
+      }
+    });
+  });
+}

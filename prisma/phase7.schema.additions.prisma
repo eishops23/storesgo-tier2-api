@@ -1,0 +1,34 @@
+model MerchantKYC {
+  id           Int            @id @default(autoincrement())
+  merchantId   Int
+  status       String          @default("pending")
+  businessName String?
+  legalName    String?
+  taxId        String?
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+  uploads      DocumentUpload[]
+}
+
+model DocumentUpload {
+  id        Int         @id @default(autoincrement())
+  kycId     Int
+  type      String
+  key       String
+  url       String?
+  createdAt DateTime     @default(now())
+  kyc       MerchantKYC  @relation(fields: [kycId], references: [id])
+}
+
+model Shipment {
+  id         Int      @id @default(autoincrement())
+  orderId    Int
+  courier    String
+  trackingId String   @unique
+  lastLat    Float?
+  lastLng    Float?
+  status     String   @default("label_created")
+  updatedAt  DateTime @default(now()) @updatedAt
+  createdAt  DateTime @default(now())
+  order      Order    @relation(fields: [orderId], references: [id])
+}

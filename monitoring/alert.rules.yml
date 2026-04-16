@@ -1,0 +1,319 @@
+# =============================================================================
+# 🚨 PROMETHEUS ALERT RULES — STORESGO BACKEND
+# Alert definitions for monitoring and incident response
+# =============================================================================
+
+groups:
+  # ===========================================================================
+  # Application Alerts
+  # ===========================================================================
+  - name: storesgo-application
+    rules:
+      # -----------------------------------------------------------------------
+      # API Health
+      # -----------------------------------------------------------------------
+      - alert: APIDown
+        expr: up{job="storesgo-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: storesgo-backend
+        annotations:
+          summary: "StoresGo API is down"
+          description: "The StoresGo backend API has been unreachable for more than 1 minute."
+          runbook_url: "https://docs.storesgo.com/runbooks/api-down"
+
+      - alert: HealthCheckFailing
+        expr: storesgo_health_check_status != 1
+        for: 2m
+        labels:
+          severity: critical
+          service: storesgo-backend
+        annotations:
+          summary: "Health check failing"
+          description: "The API health check endpoint is returning unhealthy status."
+
+      # -----------------------------------------------------------------------
+      # Response Time
+      # -----------------------------------------------------------------------
+      - alert: HighResponseTime
+        expr: histogram_quantile(0.95, rate(storesgo_http_request_duration_seconds_bucket[5m])) > 2
+        for: 5m
+        labels:
+          severity: warning
+          service: storesgo-backend
+        annotations:
+          summary: "High API response time"
+          description: "95th percentile response time is above 2 seconds for the last 5 minutes. Current: {{ $value | printf \"%.2f\" }}s"
+
+      - alert: CriticalResponseTime
+        expr: histogram_quantile(0.95, rate(storesgo_http_request_duration_seconds_bucket[5m])) > 5
+        for: 2m
+        labels:
+          severity: critical
+          service: storesgo-backend
+        annotations:
+          summary: "Critical API response time"
+          description: "95th percentile response time is above 5 seconds. Current: {{ $value | printf \"%.2f\" }}s"
+
+      # -----------------------------------------------------------------------
+      # Error Rates
+      # -----------------------------------------------------------------------
+      - alert: HighErrorRate
+        expr: |
+          (
+            sum(rate(storesgo_http_requests_total{status=~"5.."}[5m]))
+            /
+            sum(rate(storesgo_http_requests_total[5m]))
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          service: storesgo-backend
+        annotations:
+          summary: "High error rate"
+          description: "Error rate is above 5% for the last 5 minutes. Current: {{ $value | printf \"%.2f\" }}%"
+
+      - alert: CriticalErrorRate
+        expr: |
+          (
+            sum(rate(storesgo_http_requests_total{status=~"5.."}[5m]))
+            /
+            sum(rate(storesgo_http_requests_total[5m]))
+          ) > 0.10
+        for: 2m
+        labels:
+          severity: critical
+          service: storesgo-backend
+        annotations:
+          summary: "Critical error rate"
+          description: "Error rate is above 10%. Immediate investigation required."
+
+      # -----------------------------------------------------------------------
+      # Request Volume
+      # -----------------------------------------------------------------------
+      - alert: HighRequestVolume
+        expr: sum(rate(storesgo_http_requests_total[1m])) > 1000
+        for: 5m
+        labels:
+          severity: warning
+          service: storesgo-backend
+        annotations:
+          summary: "High request volume detected"
+          description: "Request rate is above 1000 req/s. Consider scaling up."
+
+      - alert: NoRequestsReceived
+        expr: sum(rate(storesgo_http_requests_total[5m])) == 0
+        for: 5m
+        labels:
+          severity: warning
+          service: storesgo-backend
+        annotations:
+          summary: "No requests received"
+          description: "API has not received any requests in the last 5 minutes. Possible routing issue."
+
+  # ===========================================================================
+  # Infrastructure Alerts
+  # ===========================================================================
+  - name: storesgo-infrastructure
+    rules:
+      # -----------------------------------------------------------------------
+      # CPU Usage
+      # -----------------------------------------------------------------------
+      - alert: HighCPUUsage
+        expr: |
+          (
+            100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)
+          ) > 80
+        for: 5m
+        labels:
+          severity: warning
+          service: infrastructure
+        annotations:
+          summary: "High CPU usage on {{ $labels.instance }}"
+          description: "CPU usage is above 80% for 5 minutes. Current: {{ $value | printf \"%.1f\" }}%"
+
+      - alert: CriticalCPUUsage
+        expr: |
+          (
+            100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)
+          ) > 95
+        for: 2m
+        labels:
+          severity: critical
+          service: infrastructure
+        annotations:
+          summary: "Critical CPU usage on {{ $labels.instance }}"
+          description: "CPU usage is above 95%. Current: {{ $value | printf \"%.1f\" }}%"
+
+      # -----------------------------------------------------------------------
+      # Memory Usage
+      # -----------------------------------------------------------------------
+      - alert: HighMemoryUsage
+        expr: |
+          (
+            (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes)
+            / node_memory_MemTotal_bytes * 100
+          ) > 80
+        for: 5m
+        labels:
+          severity: warning
+          service: infrastructure
+        annotations:
+          summary: "High memory usage on {{ $labels.instance }}"
+          description: "Memory usage is above 80%. Current: {{ $value | printf \"%.1f\" }}%"
+
+      - alert: CriticalMemoryUsage
+        expr: |
+          (
+            (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes)
+            / node_memory_MemTotal_bytes * 100
+          ) > 95
+        for: 2m
+        labels:
+          severity: critical
+          service: infrastructure
+        annotations:
+          summary: "Critical memory usage on {{ $labels.instance }}"
+          description: "Memory usage is above 95%. OOM risk imminent."
+
+      # -----------------------------------------------------------------------
+      # Disk Usage
+      # -----------------------------------------------------------------------
+      - alert: HighDiskUsage
+        expr: |
+          (
+            (node_filesystem_size_bytes{fstype!~"tmpfs|overlay"} - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"})
+            / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"} * 100
+          ) > 80
+        for: 5m
+        labels:
+          severity: warning
+          service: infrastructure
+        annotations:
+          summary: "High disk usage on {{ $labels.instance }}"
+          description: "Disk usage is above 80% on {{ $labels.mountpoint }}. Current: {{ $value | printf \"%.1f\" }}%"
+
+      - alert: CriticalDiskUsage
+        expr: |
+          (
+            (node_filesystem_size_bytes{fstype!~"tmpfs|overlay"} - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"})
+            / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"} * 100
+          ) > 95
+        for: 2m
+        labels:
+          severity: critical
+          service: infrastructure
+        annotations:
+          summary: "Critical disk usage on {{ $labels.instance }}"
+          description: "Disk usage is above 95%. Immediate action required."
+
+  # ===========================================================================
+  # Database Alerts
+  # ===========================================================================
+  - name: storesgo-database
+    rules:
+      - alert: PostgresDown
+        expr: pg_up == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: postgres
+        annotations:
+          summary: "PostgreSQL is down"
+          description: "PostgreSQL database is unreachable."
+
+      - alert: PostgresHighConnections
+        expr: |
+          sum(pg_stat_activity_count) / 
+          sum(pg_settings_max_connections) * 100 > 80
+        for: 5m
+        labels:
+          severity: warning
+          service: postgres
+        annotations:
+          summary: "High PostgreSQL connection usage"
+          description: "PostgreSQL connection pool is above 80% capacity."
+
+      - alert: PostgresSlowQueries
+        expr: |
+          rate(pg_stat_activity_max_tx_duration{datname!~"template.*"}[1m]) > 60
+        for: 5m
+        labels:
+          severity: warning
+          service: postgres
+        annotations:
+          summary: "Slow PostgreSQL queries detected"
+          description: "Long-running queries detected (>60s)."
+
+      - alert: PostgresDeadlocks
+        expr: rate(pg_stat_database_deadlocks[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          service: postgres
+        annotations:
+          summary: "PostgreSQL deadlocks detected"
+          description: "Deadlocks are occurring in the database."
+
+  # ===========================================================================
+  # Redis Alerts
+  # ===========================================================================
+  - name: storesgo-redis
+    rules:
+      - alert: RedisDown
+        expr: redis_up == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: redis
+        annotations:
+          summary: "Redis is down"
+          description: "Redis cache/queue server is unreachable."
+
+      - alert: RedisHighMemory
+        expr: |
+          redis_memory_used_bytes / redis_memory_max_bytes * 100 > 80
+        for: 5m
+        labels:
+          severity: warning
+          service: redis
+        annotations:
+          summary: "High Redis memory usage"
+          description: "Redis memory usage is above 80%."
+
+      - alert: RedisHighKeyEviction
+        expr: rate(redis_evicted_keys_total[5m]) > 100
+        for: 5m
+        labels:
+          severity: warning
+          service: redis
+        annotations:
+          summary: "High Redis key eviction rate"
+          description: "Redis is evicting keys at a high rate. Consider increasing memory."
+
+  # ===========================================================================
+  # Queue/Job Alerts
+  # ===========================================================================
+  - name: storesgo-queues
+    rules:
+      - alert: HighQueueBacklog
+        expr: storesgo_queue_waiting_jobs > 1000
+        for: 10m
+        labels:
+          severity: warning
+          service: storesgo-backend
+        annotations:
+          summary: "High queue backlog"
+          description: "Job queue has {{ $value }} waiting jobs. Workers may be overwhelmed."
+
+      - alert: FailedJobsIncreasing
+        expr: rate(storesgo_queue_failed_jobs_total[10m]) > 10
+        for: 10m
+        labels:
+          severity: warning
+          service: storesgo-backend
+        annotations:
+          summary: "Failed jobs increasing"
+          description: "Job failure rate is above 10/min. Check worker logs."
+

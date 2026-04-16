@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Payout Receipt</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        background: #f8f9fb;
+        color: #333;
+        padding: 20px;
+      }
+      .container {
+        max-width: 600px;
+        background: #fff;
+        border-radius: 10px;
+        padding: 25px;
+        margin: 0 auto;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+      }
+      h2 {
+        color: #007b55;
+        margin-bottom: 15px;
+      }
+      .summary {
+        border-top: 1px solid #e3e3e3;
+        margin-top: 20px;
+        padding-top: 15px;
+      }
+      .footer {
+        text-align: center;
+        margin-top: 30px;
+        font-size: 12px;
+        color: #777;
+      }
+      .amount {
+        font-size: 20px;
+        color: #007b55;
+        font-weight: bold;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h2>💸 Payout Receipt</h2>
+      <p>Dear {{merchantName}},</p>
+      <p>
+        This is a confirmation that your payout has been processed successfully.
+      </p>
+
+      <div class="summary">
+        <p><strong>Payout ID:</strong> {{payoutId}}</p>
+        <p><strong>Amount:</strong> <span class="amount">${{amount}}</span></p>
+        <p><strong>Status:</strong> Completed</p>
+        <p><strong>Date:</strong> {{date}}</p>
+      </div>
+
+      <p>
+        Thank you for being part of the <strong>StoresGo Marketplace</strong>.
+        We appreciate your continued partnership.
+      </p>
+
+      <div class="footer">
+        &copy; {{year}} StoresGo Inc. All rights reserved.
+      </div>
+    </div>
+  </body>
+</html>

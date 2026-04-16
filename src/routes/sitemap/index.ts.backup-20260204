@@ -1,0 +1,256 @@
+import { FastifyPluginAsync } from "fastify";
+import prisma from "../../lib/prisma.js";
+import { CUISINES as BUYER_CUISINES, LOCATIONS as BUYER_LOCATIONS } from "../../data/buyerSeoData.js";
+import { CUISINES as SELLER_CUISINES, LOCATIONS as SELLER_LOCATIONS } from "../../data/sellerSeoData.js";
+import { getAllNeighborhoodSlugs } from "../../data/neighborhoodData.js";
+import { BUYING_GUIDES } from "../../data/buyingGuidesData.js";
+import { COMPARISONS } from "../../data/comparisonData.js";
+
+const BASE_URL = "https://storesgo.com";
+
+interface SitemapUrl {
+  loc: string;
+  lastmod?: string;
+  changefreq?: string;
+  priority?: number;
+}
+
+function formatDate(date: Date): string {
+  return date.toISOString().split("T")[0];
+}
+
+function generateSitemapXml(urls: SitemapUrl[]): string {
+  const urlElements = urls.map((url) => {
+    let xml = `  <url>\n    <loc>${url.loc}</loc>`;
+    if (url.lastmod) xml += `\n    <lastmod>${url.lastmod}</lastmod>`;
+    if (url.changefreq) xml += `\n    <changefreq>${url.changefreq}</changefreq>`;
+    if (url.priority !== undefined) xml += `\n    <priority>${url.priority}</priority>`;
+    xml += `\n  </url>`;
+    return xml;
+  }).join("\n");
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urlElements}\n</urlset>`;
+}
+
+function generateSitemapIndexXml(sitemaps: { loc: string; lastmod: string }[]): string {
+  const sitemapElements = sitemaps.map((sm) => `  <sitemap>\n    <loc>${sm.loc}</loc>\n    <lastmod>${sm.lastmod}</lastmod>\n  </sitemap>`).join("\n");
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${sitemapElements}\n</sitemapindex>`;
+}
+
+const sitemapRoutes: FastifyPluginAsync = async (app) => {
+  app.get("/sitemap.xml", async (request, reply) => {
+    const today = formatDate(new Date());
+    const sitemaps = [
+      { loc: `${BASE_URL}/api/sitemap/pages.xml`, lastmod: today },
+      { loc: `${BASE_URL}/api/sitemap/blog.xml`, lastmod: today },
+      { loc: `${BASE_URL}/api/sitemap/products.xml`, lastmod: today },
+      { loc: `${BASE_URL}/api/sitemap/categories.xml`, lastmod: today },
+      { loc: `${BASE_URL}/api/sitemap/sellers.xml`, lastmod: today },
+      { loc: `${BASE_URL}/api/sitemap/seller-seo.xml`, lastmod: today },
+      { loc: `${BASE_URL}/api/sitemap/buyer-seo.xml`, lastmod: today },
+      { loc: `${BASE_URL}/api/sitemap/recipes.xml`, lastmod: today },
+      { loc: `${BASE_URL}/api/sitemap/neighborhoods.xml`, lastmod: today },
+      { loc: `${BASE_URL}/api/sitemap/guides.xml`, lastmod: today },
+      { loc: `${BASE_URL}/api/sitemap/compare.xml`, lastmod: today },
+      { loc: `${BASE_URL}/api/sitemap/buy-seo.xml`, lastmod: today },
+      { loc: `${BASE_URL}/api/sitemap/b2b-wholesale.xml`, lastmod: today },
+      { loc: `${BASE_URL}/api/sitemap/b2b-partners.xml`, lastmod: today },
+      { loc: `${BASE_URL}/api/sitemap/locations.xml`, lastmod: today },
+      { loc: `${BASE_URL}/api/sitemap/ingredients.xml`, lastmod: today },
+      { loc: `${BASE_URL}/api/sitemap/encyclopedia.xml`, lastmod: today },
+      { loc: `${BASE_URL}/api/sitemap/hub-pages.xml`, lastmod: today },
+    ];
+    reply.type("application/xml").send(generateSitemapIndexXml(sitemaps));
+  });
+
+  app.get("/blog.xml", async (request, reply) => {
+    try {
+      const posts = await prisma.blogPost.findMany({ select: { slug: true, updatedAt: true, publishedAt: true } });
+      const urls: SitemapUrl[] = posts.map((post) => ({ loc: `${BASE_URL}/blog/${post.slug}`, lastmod: formatDate(post.updatedAt || post.publishedAt || new Date()), changefreq: "weekly", priority: 0.6 }));
+      urls.unshift({ loc: `${BASE_URL}/blog`, lastmod: formatDate(new Date()), changefreq: "daily", priority: 0.7 });
+      reply.type("application/xml").send(generateSitemapXml(urls));
+    } catch (e) { reply.type("application/xml").send(generateSitemapXml([{ loc: `${BASE_URL}/blog`, lastmod: formatDate(new Date()) }])); }
+  });
+
+  app.get("/pages.xml", async (request, reply) => {
+    const today = formatDate(new Date());
+    const urls: SitemapUrl[] = [
+      { loc: BASE_URL, lastmod: today, changefreq: "daily", priority: 1.0 },
+      { loc: `${BASE_URL}/about`, lastmod: today, changefreq: "monthly", priority: 0.5 },
+      { loc: `${BASE_URL}/contact`, lastmod: today, changefreq: "monthly", priority: 0.5 },
+      { loc: `${BASE_URL}/faq`, lastmod: today, changefreq: "monthly", priority: 0.5 },
+      { loc: `${BASE_URL}/terms`, lastmod: today, changefreq: "monthly", priority: 0.3 },
+      { loc: `${BASE_URL}/privacy`, lastmod: today, changefreq: "monthly", priority: 0.3 },
+      { loc: `${BASE_URL}/how-it-works`, lastmod: today, changefreq: "monthly", priority: 0.6 },
+      { loc: `${BASE_URL}/products`, lastmod: today, changefreq: "daily", priority: 0.9 },
+      { loc: `${BASE_URL}/search`, lastmod: today, changefreq: "daily", priority: 0.8 },
+      { loc: `${BASE_URL}/deals`, lastmod: today, changefreq: "daily", priority: 0.7 },
+      { loc: `${BASE_URL}/trending`, lastmod: today, changefreq: "daily", priority: 0.7 },
+      { loc: `${BASE_URL}/sell`, lastmod: today, changefreq: "weekly", priority: 0.8 },
+      { loc: `${BASE_URL}/sell-with-us`, lastmod: today, changefreq: "monthly", priority: 0.7 },
+      { loc: `${BASE_URL}/shop`, lastmod: today, changefreq: "daily", priority: 0.9 },
+      { loc: `${BASE_URL}/recipes`, lastmod: today, changefreq: "weekly", priority: 0.8 },
+      { loc: `${BASE_URL}/stores`, lastmod: today, changefreq: "weekly", priority: 0.7 },
+      { loc: `${BASE_URL}/collections`, lastmod: today, changefreq: "weekly", priority: 0.7 },
+      { loc: `${BASE_URL}/glossary`, lastmod: today, changefreq: "monthly", priority: 0.6 },
+      { loc: `${BASE_URL}/partner`, lastmod: today, changefreq: "monthly", priority: 0.6 },
+      { loc: `${BASE_URL}/encyclopedia`, lastmod: today, changefreq: "weekly", priority: 0.8 },
+      { loc: `${BASE_URL}/ingredients`, lastmod: today, changefreq: "weekly", priority: 0.8 },
+      { loc: `${BASE_URL}/wholesale`, lastmod: today, changefreq: "weekly", priority: 0.8 },
+      { loc: `${BASE_URL}/near`, lastmod: today, changefreq: "weekly", priority: 0.8 },
+    ];
+    const regions = [...new Set(BUYER_CUISINES.map(c => c.region).filter(Boolean))];
+    regions.forEach(region => { urls.push({ loc: `${BASE_URL}/shop/${region}`, lastmod: today, changefreq: "weekly", priority: 0.8 }); });
+    reply.type("application/xml").send(generateSitemapXml(urls));
+  });
+
+  app.get("/products.xml", async (request, reply) => {
+    try {
+      const products = await prisma.product.findMany({ where: { isActive: true }, select: { id: true, slug: true, updatedAt: true }, take: 50000 });
+      const urls: SitemapUrl[] = products.map((p) => ({ loc: `${BASE_URL}/products/${p.slug || p.id}`, lastmod: formatDate(p.updatedAt || new Date()), changefreq: "weekly", priority: 0.6 }));
+      reply.type("application/xml").send(generateSitemapXml(urls));
+    } catch (e) { reply.type("application/xml").send(generateSitemapXml([])); }
+  });
+
+  app.get("/categories.xml", async (request, reply) => {
+    try {
+      const categories = await prisma.category.findMany({ select: { slug: true, updatedAt: true } });
+      const urls: SitemapUrl[] = categories.map((c) => ({ loc: `${BASE_URL}/categories/${c.slug}`, lastmod: formatDate(c.updatedAt || new Date()), changefreq: "weekly", priority: 0.7 }));
+      reply.type("application/xml").send(generateSitemapXml(urls));
+    } catch (e) { reply.type("application/xml").send(generateSitemapXml([])); }
+  });
+
+  app.get("/sellers.xml", async (request, reply) => {
+    try {
+      const sellers = await prisma.seller.findMany({ select: { slug: true, updatedAt: true } });
+      const urls: SitemapUrl[] = sellers.map((s) => ({ loc: `${BASE_URL}/seller/${s.slug}`, lastmod: formatDate(s.updatedAt || new Date()), changefreq: "weekly", priority: 0.6 }));
+      reply.type("application/xml").send(generateSitemapXml(urls));
+    } catch (e) { reply.type("application/xml").send(generateSitemapXml([])); }
+  });
+
+  app.get("/seller-seo.xml", async (request, reply) => {
+    const urls: SitemapUrl[] = [];
+    const today = formatDate(new Date());
+    urls.push({ loc: `${BASE_URL}/sell`, lastmod: today, changefreq: "weekly", priority: 0.9 });
+    urls.push({ loc: `${BASE_URL}/sell-with-us`, lastmod: today, changefreq: "monthly", priority: 0.8 });
+    SELLER_CUISINES.forEach(cuisine => {
+      SELLER_LOCATIONS.forEach(location => { urls.push({ loc: `${BASE_URL}/sell/${cuisine.slug}/${location.slug}`, lastmod: today, changefreq: "weekly", priority: 0.8 }); });
+      urls.push({ loc: `${BASE_URL}/sell/join/${cuisine.slug}`, lastmod: today, changefreq: "monthly", priority: 0.6 });
+    });
+    reply.type("application/xml").send(generateSitemapXml(urls));
+  });
+
+  app.get("/buyer-seo.xml", async (request, reply) => {
+    const urls: SitemapUrl[] = [];
+    const today = formatDate(new Date());
+    urls.push({ loc: `${BASE_URL}/shop`, lastmod: today, changefreq: "daily", priority: 0.9 });
+    const regions = [...new Set(BUYER_CUISINES.map(c => c.region).filter(Boolean))];
+    regions.forEach(region => { urls.push({ loc: `${BASE_URL}/shop/${region}`, lastmod: today, changefreq: "weekly", priority: 0.8 }); });
+    BUYER_CUISINES.forEach(cuisine => {
+      BUYER_LOCATIONS.forEach(location => { urls.push({ loc: `${BASE_URL}/shop/${cuisine.slug}/${location.slug}`, lastmod: today, changefreq: "weekly", priority: 0.8 }); });
+    });
+    reply.type("application/xml").send(generateSitemapXml(urls));
+  });
+
+  app.get("/recipes.xml", async (request, reply) => {
+    try {
+      const [slugsRes, statsRes] = await Promise.all([
+        fetch("http://localhost:5000/api/recipes-expanded/sitemap/slugs"),
+        fetch("http://localhost:5000/api/recipes-expanded/stats")
+      ]);
+      const slugsData = await slugsRes.json();
+      const statsData = await statsRes.json();
+      const urls: SitemapUrl[] = [];
+      const today = formatDate(new Date());
+      urls.push({ loc: `${BASE_URL}/recipes`, lastmod: today, changefreq: "daily", priority: 0.9 });
+      if (slugsData.ok && slugsData.data) { slugsData.data.forEach((slug: string) => { urls.push({ loc: `${BASE_URL}/recipes/${slug}`, lastmod: today, changefreq: "weekly", priority: 0.8 }); }); }
+      if (statsData.ok && statsData.data?.cuisines) { statsData.data.cuisines.forEach((c: { cuisine: string }) => { urls.push({ loc: `${BASE_URL}/recipes/cuisine/${c.cuisine}`, lastmod: today, changefreq: "weekly", priority: 0.7 }); }); }
+      ["main", "side", "appetizer", "soup", "dessert", "snack", "breakfast", "drink"].forEach(cat => urls.push({ loc: `${BASE_URL}/recipes/category/${cat}`, lastmod: today, changefreq: "weekly", priority: 0.7 }));
+      ["easy", "quick-meals", "spicy", "vegetarian", "vegan", "comfort-food", "traditional", "healthy"].forEach(tag => urls.push({ loc: `${BASE_URL}/recipes/tag/${tag}`, lastmod: today, changefreq: "weekly", priority: 0.6 }));
+      ["quick-meals", "family-favorites", "weeknight-dinners", "spicy", "vegetarian", "vegan"].forEach(col => urls.push({ loc: `${BASE_URL}/recipes/collection/${col}`, lastmod: today, changefreq: "weekly", priority: 0.6 }));
+      reply.type("application/xml").send(generateSitemapXml(urls));
+    } catch (e) { reply.type("application/xml").send(generateSitemapXml([{ loc: `${BASE_URL}/recipes`, lastmod: formatDate(new Date()), priority: 0.9 }])); }
+  });
+
+  app.get("/neighborhoods.xml", async (request, reply) => {
+    const urls: SitemapUrl[] = [];
+    const today = formatDate(new Date());
+    const neighborhoodSlugs = getAllNeighborhoodSlugs();
+    const cuisineSlugs = BUYER_CUISINES.map(c => c.slug);
+    cuisineSlugs.forEach(cuisine => { neighborhoodSlugs.forEach(neighborhood => { urls.push({ loc: `${BASE_URL}/shop/${cuisine}/${neighborhood}`, lastmod: today, changefreq: "weekly", priority: 0.7 }); }); });
+    reply.type("application/xml").send(generateSitemapXml(urls));
+  });
+
+  app.get("/guides.xml", async (request, reply) => {
+    const urls: SitemapUrl[] = [];
+    const today = formatDate(new Date());
+    urls.push({ loc: `${BASE_URL}/guides`, lastmod: today, changefreq: "weekly", priority: 0.7 });
+    BUYING_GUIDES.forEach(guide => { urls.push({ loc: `${BASE_URL}/guides/${guide.slug}`, lastmod: today, changefreq: "monthly", priority: 0.6 }); });
+    reply.type("application/xml").send(generateSitemapXml(urls));
+  });
+
+  app.get("/compare.xml", async (request, reply) => {
+    const urls: SitemapUrl[] = [];
+    const today = formatDate(new Date());
+    urls.push({ loc: `${BASE_URL}/compare`, lastmod: today, changefreq: "monthly", priority: 0.7 });
+    COMPARISONS.forEach(comp => { urls.push({ loc: `${BASE_URL}/compare/${comp.slug}`, lastmod: today, changefreq: "monthly", priority: 0.6 }); });
+    reply.type("application/xml").send(generateSitemapXml(urls));
+  });
+
+  // Encyclopedia sitemap
+  app.get("/encyclopedia.xml", async (request, reply) => {
+    const today = formatDate(new Date());
+    try {
+      const res = await fetch("http://localhost:5000/api/encyclopedia?limit=100");
+      const data = await res.json();
+      const urls: SitemapUrl[] = [{ loc: `${BASE_URL}/encyclopedia`, lastmod: today, changefreq: "weekly", priority: 0.8 }];
+      if (data.ok && data.data) {
+        data.data.forEach((article: { slug: string }) => {
+          urls.push({ loc: `${BASE_URL}/encyclopedia/${article.slug}`, lastmod: today, changefreq: "monthly", priority: 0.7 });
+        });
+      }
+      reply.type("application/xml").send(generateSitemapXml(urls));
+    } catch (e) { reply.type("application/xml").send(generateSitemapXml([{ loc: `${BASE_URL}/encyclopedia`, lastmod: today }])); }
+  });
+
+  app.get("/buy-seo.xml", async (request, reply) => {
+    try {
+      const response = await fetch("http://localhost:5000/api/buy-seo/sitemap");
+      const data = await response.json();
+      const urls: SitemapUrl[] = [];
+      const today = formatDate(new Date());
+      if (data.ok && data.data) { data.data.forEach((path: string) => { urls.push({ loc: `${BASE_URL}${path}`, lastmod: today, changefreq: "weekly", priority: 0.7 }); }); }
+      reply.type("application/xml").send(generateSitemapXml(urls));
+    } catch (e) { reply.type("application/xml").send(generateSitemapXml([])); }
+  });
+
+  app.log.info("🗺️ Sitemap routes registered (enterprise mode)");
+
+
+  // Hub SEO Pages sitemap (city + category landing pages)
+  app.get("/hub-pages.xml", async (request, reply) => {
+    const today = formatDate(new Date());
+    const LOCATIONS = [
+      "miami", "hialeah", "fort-lauderdale", "hollywood", "pompano-beach", "west-palm-beach",
+      "boca-raton", "delray-beach", "boynton-beach", "miami-gardens", "homestead", "miami-beach",
+      "doral", "coral-springs", "pembroke-pines", "miramar", "davie", "sunrise", "plantation",
+      "lauderhill", "tamarac", "north-miami", "margate", "little-haiti", "little-havana",
+      "kendall", "westchester", "sweetwater", "liberty-city", "overtown"
+    ];
+    const CATEGORIES = [
+      "jamaican-grocery", "caribbean-grocery", "haitian-grocery", "trinidadian-grocery", "cuban-grocery",
+      "mexican-grocery", "latin-grocery", "colombian-grocery", "venezuelan-grocery", "african-grocery",
+      "nigerian-grocery", "ghanaian-grocery", "asian-grocery", "indian-grocery", "filipino-grocery",
+      "chinese-grocery", "ethnic-grocery", "international-grocery"
+    ];
+    const urls: SitemapUrl[] = [];
+    for (const loc of LOCATIONS) {
+      for (const cat of CATEGORIES) {
+        urls.push({ loc: `${BASE_URL}/${loc}/${cat}`, lastmod: today, changefreq: "weekly", priority: 0.8 });
+      }
+    }
+    reply.type("application/xml").send(generateSitemapXml(urls));
+  });
+
+  app.log.info("🗺️ Sitemap routes registered (enterprise mode)");
+};
+export default sitemapRoutes;

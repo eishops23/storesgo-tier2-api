@@ -1,0 +1,409 @@
+# =============================================================================
+# 🚀 STORESGO BACKEND — CI/CD PIPELINE
+# Automated build, test, and deployment workflow for GitHub Actions
+# =============================================================================
+
+name: Deploy Backend
+
+on:
+  push:
+    branches:
+      - main
+      - staging
+    paths:
+      - 'src/**'
+      - 'prisma/**'
+      - 'package*.json'
+      - 'Dockerfile'
+      - '.github/workflows/deploy-backend.yml'
+  pull_request:
+    branches:
+      - main
+      - staging
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+
+env:
+  NODE_VERSION: '20'
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/storesgo-backend
+
+jobs:
+  # ===========================================================================
+  # Job 1: Lint & Type Check
+  # ===========================================================================
+  lint:
+    name: 🔍 Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma Client
+        run: npx prisma generate
+
+      - name: Run TypeScript type check
+        run: npx tsc --noEmit -p tsconfig.build.json
+
+  # ===========================================================================
+  # Job 2: Run Tests
+  # ===========================================================================
+  test:
+    name: 🧪 Run Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: storesgo_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma Client
+        run: npx prisma generate
+
+      - name: Run database migrations
+        run: npx prisma migrate deploy
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/storesgo_test
+
+      - name: Build application
+        run: npm run build
+
+      - name: Run smoke tests
+        run: |
+          # Start the server in background
+          NODE_ENV=test DATABASE_URL=postgresql://test:test@localhost:5432/storesgo_test \
+          REDIS_URL=redis://localhost:6379 \
+          JWT_SECRET=test-secret ADMIN_JWT_SECRET=admin-test SELLER_JWT_SECRET=seller-test \
+          node dist/index.prod.js &
+          
+          # Wait for server to start
+          sleep 10
+          
+          # Run health check
+          curl -f http://localhost:5000/api/health || exit 1
+          
+          echo "✅ Smoke tests passed!"
+
+  # ===========================================================================
+  # Job 3: Build Docker Image
+  # ===========================================================================
+  build:
+    name: 🐳 Build Docker Image
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+  # ===========================================================================
+  # Job 4: Deploy to Staging
+  # ===========================================================================
+  deploy-staging:
+    name: 🚀 Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/staging' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging')
+    environment:
+      name: staging
+      url: https://api-staging.storesgo.com
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install OCI CLI
+        run: |
+          pip install oci-cli
+
+      - name: Configure OCI CLI
+        run: |
+          mkdir -p ~/.oci
+          echo "${{ secrets.OCI_CONFIG }}" > ~/.oci/config
+          echo "${{ secrets.OCI_KEY }}" > ~/.oci/key.pem
+          chmod 600 ~/.oci/key.pem ~/.oci/config
+
+      - name: Deploy to OCI Container Instance (Staging)
+        run: |
+          echo "🚀 Deploying to staging environment..."
+          
+          # Update container instance with new image
+          oci container-instances container-instance update \
+            --container-instance-id ${{ secrets.OCI_STAGING_INSTANCE_ID }} \
+            --containers '[{
+              "containerId": "${{ secrets.OCI_STAGING_CONTAINER_ID }}",
+              "imageUrl": "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+            }]' \
+            --force
+          
+          echo "✅ Staging deployment initiated!"
+
+      - name: Wait for deployment
+        run: sleep 60
+
+      - name: Verify deployment health
+        run: |
+          for i in {1..10}; do
+            if curl -sf https://api-staging.storesgo.com/api/health; then
+              echo "✅ Staging deployment healthy!"
+              exit 0
+            fi
+            echo "Waiting for service to be ready... ($i/10)"
+            sleep 10
+          done
+          echo "❌ Health check failed!"
+          exit 1
+
+      - name: Notify Slack - Staging Deployed
+        if: success()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "text": "✅ StoresGo Backend deployed to *staging*",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "✅ *StoresGo Backend* deployed to *staging*\n\n*Commit:* `${{ github.sha }}`\n*Branch:* `${{ github.ref_name }}`\n*By:* ${{ github.actor }}"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+
+  # ===========================================================================
+  # Job 5: Deploy to Production
+  # ===========================================================================
+  deploy-production:
+    name: 🚀 Deploy to Production
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production')
+    environment:
+      name: production
+      url: https://api.storesgo.com
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Configure kubectl for OKE
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.OKE_KUBECONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Update Kubernetes deployment
+        run: |
+          # Update the deployment with new image
+          kubectl set image deployment/storesgo-backend \
+            storesgo-backend=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+            -n storesgo-prod
+          
+          # Wait for rollout
+          kubectl rollout status deployment/storesgo-backend -n storesgo-prod --timeout=300s
+
+      - name: Verify deployment health
+        run: |
+          for i in {1..10}; do
+            if curl -sf https://api.storesgo.com/api/health; then
+              echo "✅ Production deployment healthy!"
+              exit 0
+            fi
+            echo "Waiting for service to be ready... ($i/10)"
+            sleep 10
+          done
+          echo "❌ Health check failed!"
+          exit 1
+
+      - name: Create Sentry release
+        uses: getsentry/action-release@v1
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+          SENTRY_PROJECT: storesgo-backend
+        with:
+          environment: production
+          version: ${{ github.sha }}
+
+      - name: Notify Slack - Production Deployed
+        if: success()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "text": "🚀 StoresGo Backend deployed to *PRODUCTION*",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "🚀 *StoresGo Backend* deployed to *PRODUCTION*\n\n*Commit:* `${{ github.sha }}`\n*By:* ${{ github.actor }}\n*URL:* https://api.storesgo.com"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+
+      - name: Notify on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "text": "❌ StoresGo Backend PRODUCTION deployment FAILED!",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "❌ *StoresGo Backend* PRODUCTION deployment *FAILED*!\n\n*Commit:* `${{ github.sha }}`\n*By:* ${{ github.actor }}\n*Run:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Logs>"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+
+  # ===========================================================================
+  # Job 6: Rollback (Manual)
+  # ===========================================================================
+  rollback:
+    name: ⏪ Rollback Production
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    environment:
+      name: production-rollback
+    steps:
+      - name: Configure kubectl for OKE
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.OKE_KUBECONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Rollback deployment
+        run: |
+          kubectl rollout undo deployment/storesgo-backend -n storesgo-prod
+          kubectl rollout status deployment/storesgo-backend -n storesgo-prod --timeout=300s
+
+      - name: Notify Slack - Rollback Complete
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "text": "⏪ StoresGo Backend rolled back in production",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "⏪ *StoresGo Backend* rolled back in *production*\n\n*By:* ${{ github.actor }}"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+

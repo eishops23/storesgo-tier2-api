@@ -1,0 +1,72 @@
+# =============================================================================
+# 🌐 KUBERNETES SERVICE — STORESGO BACKEND
+# Exposes the backend deployment within the cluster
+# =============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: storesgo-backend
+  namespace: storesgo-prod
+  labels:
+    app.kubernetes.io/name: storesgo-backend
+    app.kubernetes.io/component: backend
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "5000"
+    prometheus.io/path: "/api/metrics"
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 80
+      targetPort: 5000
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: storesgo-backend
+---
+# =============================================================================
+# 🔀 KUBERNETES INGRESS — STORESGO BACKEND
+# External access configuration with NGINX Ingress Controller
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: storesgo-backend-ingress
+  namespace: storesgo-prod
+  labels:
+    app.kubernetes.io/name: storesgo-backend
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
+    # Rate limiting
+    nginx.ingress.kubernetes.io/limit-rps: "100"
+    nginx.ingress.kubernetes.io/limit-connections: "50"
+    # CORS headers
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "https://storesgo.com,https://www.storesgo.com"
+    nginx.ingress.kubernetes.io/cors-allow-methods: "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+    nginx.ingress.kubernetes.io/cors-allow-headers: "DNT,X-CustomHeader,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Authorization"
+    # Certificate manager
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - api.storesgo.com
+      secretName: storesgo-api-tls
+  rules:
+    - host: api.storesgo.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: storesgo-backend
+                port:
+                  number: 80
+

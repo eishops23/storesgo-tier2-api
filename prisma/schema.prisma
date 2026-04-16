@@ -1,0 +1,1191 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Category {
+  id                 Int                         @id @default(autoincrement())
+  name               String
+  slug               String                      @unique
+  icon               String?
+  image              String?
+  tagline            String?
+  color              String?
+  sortOrder          Int                         @default(0)
+  parentId           Int?
+  createdAt          DateTime                    @default(now())
+  updatedAt          DateTime                    @updatedAt
+  seo_description    String?                     @map("seo_description")
+  seo_title          String?                     @map("seo_title")
+  seo_content        String?                     @map("seo_content")
+  parent             Category?                   @relation("CategoryParent", fields: [parentId], references: [id])
+  children           Category[]                  @relation("CategoryParent")
+  productAssignments ProductCategoryAssignment[]
+  products           Product[]
+
+  @@index([slug])
+  @@index([name])
+  @@index([parentId], map: "idx_categories_parent")
+  @@index([slug], map: "idx_categories_slug")
+  @@map("categories")
+}
+
+model Seller {
+  id            Int            @id @default(autoincrement())
+  userId        String?        @unique
+  storeName     String
+  slug          String         @unique
+  city          String?
+  state         String?
+  country       String?
+  about         String?
+  isApproved    Boolean        @default(false)
+  isBanned      Boolean        @default(false)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  zipCode       String?
+  street        String?
+  blogPosts     BlogPost[]
+  notifications Notification[]
+  orders        Order[]
+  payouts       PayoutRecord[]
+  products      Product[]
+  promoCodes    PromoCode[]
+  reviews       Review[]
+  user          User?          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  stores        Store[]
+  earnings      Transaction[]
+  wallet        Wallet?
+
+  @@index([slug])
+  @@index([slug], map: "idx_sellers_slug")
+  @@map("sellers")
+}
+
+model Store {
+  id          Int       @id @default(autoincrement())
+  sellerId    Int?
+  name        String
+  slug        String    @unique
+  description String?
+  image       String?
+  city        String?
+  state       String?
+  country     String?
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  products    Product[]
+  seller      Seller?   @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  @@index([slug])
+  @@index([sellerId])
+  @@map("stores")
+}
+
+model User {
+  id                      String           @id @default(cuid())
+  email                   String           @unique
+  password                String
+  role                    UserRole         @default(BUYER)
+  createdAt               DateTime         @default(now())
+  updatedAt               DateTime         @updatedAt
+  referral_code           String?          @unique @db.VarChar(10)
+  referred_by_code        String?          @db.VarChar(10)
+  referral_credit         Decimal?         @default(0.00) @db.Decimal(10, 2)
+  total_referrals         Int?             @default(0)
+  total_referral_earnings Decimal?         @default(0.00) @db.Decimal(10, 2)
+  addresses               Address[]
+  buyerProfile            BuyerProfile?
+  favorites               Favorite[]
+  memberships             Membership[]
+  notifications           Notification[]
+  orders                  Order[]
+  paymentMethods          PaymentMethod[]
+  promoCodeUsages         PromoCodeUsage[]
+  referredBy              Referral[]       @relation("ReferredByReferrals")
+  referralsMade           Referral[]       @relation("ReferrerReferrals")
+  reviews                 Review[]
+  sellerProfile           Seller?
+  transactions            Transaction[]
+  wallet                  Wallet?          @relation("UserWallet")
+
+  @@index([email])
+  @@map("users")
+}
+
+model BuyerProfile {
+  id               String  @id @default(cuid())
+  userId           String  @unique
+  firstName        String?
+  lastName         String?
+  phone            String?
+  defaultAddressId String?
+  expoPushToken    String?
+  squareCustomerId String?
+  adminNotes       String?
+  stripeCustomerId String?
+  user             User    @relation(fields: [userId], references: [id])
+
+  @@map("buyer_profiles")
+}
+
+model Wallet {
+  id           Int      @id @default(autoincrement())
+  sellerId     Int?     @unique
+  userId       String?  @unique
+  balanceCents Int      @default(0)
+  currency     String   @default("USD")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  seller       Seller?  @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  user         User?    @relation("UserWallet", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("wallets")
+}
+
+model PayoutRecord {
+  id          Int      @id @default(autoincrement())
+  sellerId    Int
+  amountCents Int
+  currency    String   @default("USD")
+  status      String   @default("pending")
+  createdAt   DateTime @default(now())
+  seller      Seller   @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  @@map("payout_records")
+}
+
+model ImportItem {
+  id         Int      @id @default(autoincrement())
+  productId  Int?
+  sourceFile String?
+  status     String?  @default("pending")
+  createdAt  DateTime @default(now())
+  product    Product? @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@map("import_items")
+}
+
+model AICategoryLog {
+  id          Int      @id @default(autoincrement())
+  productId   Int?
+  oldCategory String?
+  newCategory String?
+  confidence  Float?
+  updatedBy   String?
+  createdAt   DateTime @default(now())
+  chosenSlug  String?  @map("chosen_slug")
+  promptHash  String?  @map("prompt_hash")
+  resultJson  Json?    @map("result_json")
+  product     Product? @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@map("ai_category_logs")
+}
+
+model Product {
+  id                  Int                         @id @default(autoincrement())
+  sellerId            Int
+  name                String
+  slug                String?                     @unique
+  description         String?
+  sku                 String?                     @unique
+  externalId          String?                     @unique
+  priceCents          Int
+  imageUrl            String?
+  currency            String                      @default("USD")
+  categoryId          Int?                        @map("category_id")
+  status              String                      @default("pending")
+  isActive            Boolean                     @default(true)
+  createdAt           DateTime                    @default(now())
+  updatedAt           DateTime                    @updatedAt
+  storeId             Int?
+  shippingWeightGrams Int?                        @default(0)
+  shippingLengthCm    Int?
+  shippingWidthCm     Int?
+  shippingHeightCm    Int?
+  shippingMode        ShippingMode?               @default(LIVE)
+  flatRateAmount      Float?
+  freeShipping        Boolean                     @default(false)
+  aiDescription       String?
+  aiTags              String[]                    @default([])
+  aiBulletPoints      String[]                    @default([])
+  aiTargetAudience    String?
+  aiEnrichedAt        DateTime?
+  aiEnrichmentStatus  String?                     @default("pending")
+  aiReviewedAt        DateTime?
+  aiReviewedBy        Int?
+  aiModerationFlags   String[]                    @default([])
+  sourceImageUrl      String?
+  aiSeoKeywords       String[]                    @default([])
+  unitId              Int?
+  unitQuantity        Decimal?                    @db.Decimal(10, 3)
+  pricePerUnitCents   Int?
+  displayUnit         String?
+  aiBrand             String?
+  isPrimary           Boolean?                    @map("isPrimary")
+  canonicalProductId  Int?                        @map("canonicalProductId")
+  aiSeoTitle          String?                     @map("aiSeoTitle") @db.VarChar(255)
+  aiSeoDescription    String?                     @map("aiSeoDescription")
+  aiLogs              AICategoryLog[]
+  enrichmentLogs      AIEnrichmentLog[]
+  favorites           Favorite[]
+  importItems         ImportItem[]
+  orderItems          OrderItem[]
+  attributes          ProductAttribute[]
+  categoryAssignments ProductCategoryAssignment[]
+  embedding           productEmbedding?
+  images              ProductImage[]
+  inventory           ProductInventory?
+  category            Category?                   @relation(fields: [categoryId], references: [id])
+  seller              Seller                      @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  store               Store?                      @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  reviews             Review[]
+
+  @@index([isActive, categoryId], map: "idx_products_active_category")
+  @@index([isActive, sellerId], map: "idx_products_active_seller")
+  @@index([name(ops: raw("gin_trgm_ops"))], map: "idx_products_name_trgm", type: Gin)
+  @@index([slug(ops: raw("gin_trgm_ops"))], map: "idx_products_slug_trgm", type: Gin)
+  @@map("products")
+}
+
+model ProductImage {
+  id        Int      @id @default(autoincrement())
+  productId Int
+  url       String
+  altText   String?
+  sortOrder Int      @default(0)
+  isPrimary Boolean  @default(false)
+  createdAt DateTime @default(now())
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId])
+  @@map("product_images")
+}
+
+model Order {
+  id                 Int              @id @default(autoincrement())
+  buyerId            String
+  sellerId           Int
+  totalAmountCents   Int
+  currency           String           @default("USD")
+  status             String           @default("pending")
+  createdAt          DateTime         @default(now())
+  shippingName       String?
+  shippingStreet     String?
+  shippingCity       String?
+  shippingState      String?
+  shippingZip        String?
+  shippingPhone      String?
+  shippingCarrier    String?
+  shippingService    String?
+  shippingPriceCents Int?
+  trackingNumber     String?
+  discountCents      Int?
+  serviceFeeCents    Int?
+  taxCents           Int?
+  tipCents           Int?
+  paymentStatus      String?          @default("PENDING")
+  squarePaymentId    String?
+  stripePaymentId    String?
+  orderItems         OrderItem[]
+  buyer              User             @relation(fields: [buyerId], references: [id], onDelete: Cascade)
+  seller             Seller           @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  promoUsages        PromoCodeUsage[]
+  transactions       Transaction[]
+
+  @@map("orders")
+}
+
+model OrderItem {
+  id                     Int      @id @default(autoincrement())
+  orderId                Int
+  productId              Int
+  quantity               Int      @default(1)
+  priceCents             Int
+  createdAt              DateTime @default(now())
+  substitutionPreference String   @default("best_match") @map("substitution_preference")
+  substitutionStatus     String?  @map("substitution_status")
+  substitutionNote       String?  @map("substitution_note")
+  order                  Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product                Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([orderId], map: "idx_orderitems_order")
+  @@map("order_items")
+}
+
+model Transaction {
+  id          Int      @id @default(autoincrement())
+  orderId     Int
+  amountCents Int
+  currency    String   @default("USD")
+  status      String   @default("success")
+  createdAt   DateTime @default(now())
+  sellerId    Int?
+  userId      String?
+  order       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  seller      Seller?  @relation(fields: [sellerId], references: [id])
+  user        User?    @relation(fields: [userId], references: [id])
+
+  @@map("transactions")
+}
+
+model Review {
+  id        Int      @id @default(autoincrement())
+  userId    String
+  sellerId  Int?
+  productId Int
+  rating    Int
+  comment   String?
+  createdAt DateTime @default(now())
+  product   Product  @relation(fields: [productId], references: [id])
+  seller    Seller?  @relation(fields: [sellerId], references: [id])
+  user      User     @relation(fields: [userId], references: [id])
+
+  @@index([productId], map: "idx_reviews_product")
+  @@map("reviews")
+}
+
+model Membership {
+  id        Int      @id @default(autoincrement())
+  userId    String
+  level     String?
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("memberships")
+}
+
+model SeoPage {
+  id              Int       @id @default(autoincrement())
+  type            String?
+  title           String
+  slug            String    @unique
+  metaTitle       String?
+  metaDescription String?
+  contentHtml     String?
+  published       Boolean   @default(false)
+  publishedAt     DateTime?
+  embedding       Float[]
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@map("seo_pages")
+}
+
+model AdminUser {
+  id        Int      @id @default(autoincrement())
+  email     String   @unique
+  password  String
+  role      String   @default("admin")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("admin_users")
+}
+
+model AiAdminAuditLog {
+  id             BigInt   @id @default(autoincrement())
+  adminId        Int      @map("admin_id")
+  featureKey     String   @map("feature_key")
+  conversationId String?  @map("conversation_id")
+  toolName       String?  @map("tool_name")
+  action         String
+  inputSummary   Json?    @map("input_summary")
+  resultSummary  Json?    @map("result_summary")
+  success        Boolean
+  errorMessage   String?  @map("error_message")
+  durationMs     Int?     @map("duration_ms")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@index([adminId, createdAt(sort: Desc)])
+  @@index([featureKey, createdAt(sort: Desc)])
+  @@map("ai_admin_audit_log")
+}
+
+model HeroSlide {
+  id        Int      @id @default(autoincrement())
+  title     String
+  imageUrl  String
+  link      String?
+  createdAt DateTime @default(now())
+}
+
+model HomepageSection {
+  id        Int      @id @default(autoincrement())
+  title     String
+  type      String
+  order     Int      @default(0)
+  visible   Boolean  @default(true)
+  createdAt DateTime @default(now())
+}
+
+model AiLog {
+  id        Int      @id @default(autoincrement())
+  type      String
+  input     Json
+  output    Json?
+  createdAt DateTime @default(now())
+
+  @@map("ai_logs")
+}
+
+model productEmbedding {
+  id        Int      @id @default(autoincrement())
+  productId Int      @unique
+  vector    Float[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@map("product_embeddings")
+}
+
+model seoTask {
+  id         Int      @id @default(autoincrement())
+  type       String
+  status     String   @default("pending")
+  targetSlug String?
+  payload    Json?
+  attempts   Int?     @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@map("seo_tasks")
+}
+
+model seasonalDeal {
+  id          Int      @id @default(autoincrement())
+  title       String
+  description String?
+  imageUrl    String?
+  discountPct Float?
+  startDate   DateTime
+  endDate     DateTime
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("seasonal_deals")
+}
+
+model internalLink {
+  id         Int      @id @default(autoincrement())
+  fromSlug   String?
+  toSlug     String?
+  anchorText String?
+  relevance  Float?   @default(0)
+  linkType   String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  sourceSlug String?
+  targetSlug String?
+
+  @@map("internal_links")
+}
+
+model PromoCode {
+  id               Int              @id @default(autoincrement())
+  code             String           @unique
+  description      String?
+  discountType     String           @default("percentage")
+  discountValue    Float
+  minOrderCents    Int?
+  maxDiscountCents Int?
+  usageLimit       Int?
+  usageCount       Int              @default(0)
+  perUserLimit     Int?             @default(1)
+  validFrom        DateTime         @default(now())
+  validUntil       DateTime?
+  isActive         Boolean          @default(true)
+  applicableTo     String           @default("all")
+  applicableIds    Int[]
+  sellerId         Int?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+  usages           PromoCodeUsage[]
+  seller           Seller?          @relation(fields: [sellerId], references: [id])
+
+  @@map("promo_codes")
+}
+
+model PromoCodeUsage {
+  id            Int       @id @default(autoincrement())
+  promoCodeId   Int
+  visitorId     String?
+  userId        String?
+  orderId       Int?
+  discountCents Int
+  usedAt        DateTime  @default(now())
+  order         Order?    @relation(fields: [orderId], references: [id])
+  promoCode     PromoCode @relation(fields: [promoCodeId], references: [id])
+  user          User?     @relation(fields: [userId], references: [id])
+
+  @@map("promo_code_usages")
+}
+
+model ProductInventory {
+  id                Int                 @id @default(autoincrement())
+  productId         Int                 @unique
+  stockQuantity     Int                 @default(0)
+  reservedQuantity  Int                 @default(0)
+  lowStockThreshold Int                 @default(10)
+  trackInventory    Boolean             @default(true)
+  allowBackorder    Boolean             @default(false)
+  lastRestockedAt   DateTime?
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  movements         InventoryMovement[]
+  product           Product             @relation(fields: [productId], references: [id])
+
+  @@map("product_inventory")
+}
+
+model InventoryMovement {
+  id            Int              @id @default(autoincrement())
+  inventoryId   Int
+  movementType  String
+  quantity      Int
+  previousStock Int
+  newStock      Int
+  reason        String?
+  referenceType String?
+  referenceId   Int?
+  createdBy     Int?
+  createdAt     DateTime         @default(now())
+  inventory     ProductInventory @relation(fields: [inventoryId], references: [id])
+
+  @@map("inventory_movements")
+}
+
+model HomepageConfig {
+  id                  Int      @id @default(autoincrement())
+  heroTitle           String   @default("Welcome to StoresGo")
+  heroSubtitle        String   @default("Your global marketplace")
+  heroImageUrl        String?
+  featuredCategoryIds Int[]    @default([])
+  featuredProductIds  Int[]    @default([])
+  showNewArrivals     Boolean  @default(true)
+  showDeals           Boolean  @default(true)
+  showPopular         Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  blogSectionTitle    String?
+  ctaButtonLabel      String?
+  ctaButtonUrl        String?
+  ctaSubtitle         String?
+  ctaTitle            String?
+  footerAboutHtml     String?
+  footerLinksJson     Json?
+  footerSocialJson    Json?
+
+  @@map("homepage_config")
+}
+
+model ProductCategoryAssignment {
+  id           Int       @id @default(autoincrement())
+  productId    Int
+  categoryId   Int
+  confidence   Float?    @default(0)
+  isPrimary    Boolean   @default(false)
+  assignedBy   String?
+  reviewStatus String    @default("pending")
+  reviewedAt   DateTime?
+  reviewedBy   String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  category     Category  @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  product      Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, categoryId])
+  @@index([categoryId], map: "idx_pca_category_id")
+  @@index([productId], map: "idx_pca_product_id")
+  @@map("product_category_assignments")
+}
+
+model Notification {
+  id             Int       @id @default(autoincrement())
+  userId         String?
+  sellerId       Int?
+  adminId        Int?
+  title          String
+  message        String
+  recipientEmail String?
+  recipientPhone String?
+  referenceType  String?
+  referenceId    Int?
+  metadata       Json?
+  sentAt         DateTime?
+  readAt         DateTime?
+  failReason     String?
+  retryCount     Int       @default(0)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  data           Json?
+  read           Boolean   @default(false)
+  type           String    @default("SYSTEM")
+  channel        String?
+  status         String    @default("unread")
+  seller         Seller?   @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  user           User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("notifications")
+}
+
+model PasswordResetToken {
+  id        Int       @id @default(autoincrement())
+  tokenHash String?
+  userId    String
+  adminId   Int?
+  userType  String?
+  email     String?
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  ipAddress String?
+  userAgent String?
+  token     String?
+  used      Boolean   @default(false)
+
+  @@map("password_reset_tokens")
+}
+
+model BlogPost {
+  id              Int       @id @default(autoincrement())
+  title           String
+  slug            String    @unique
+  contentHtml     String?
+  excerpt         String?
+  featuredImage   String?
+  metaTitle       String?
+  metaDescription String?
+  language        String?   @default("en")
+  source          String?
+  category        String?
+  tags            String[]  @default([])
+  published       Boolean   @default(false)
+  publishedAt     DateTime?
+  aiModel         String?
+  aiPromptHash    String?
+  sellerId        Int?
+  productId       Int?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  embedding       Float[]   @default([])
+  imageUrl        String?
+  keywords        String[]  @default([])
+  seller          Seller?   @relation(fields: [sellerId], references: [id])
+
+  @@index([published, publishedAt(sort: Desc)], map: "idx_blog_published")
+  @@index([source], map: "idx_blog_source")
+  @@map("blog_posts")
+}
+
+model Address {
+  id         String   @id @default(cuid())
+  userId     String
+  label      String?
+  firstName  String?
+  lastName   String?
+  street     String
+  apt        String?
+  city       String
+  state      String
+  zip        String
+  country    String   @default("US")
+  phone      String?
+  isDefault  Boolean  @default(false)
+  isVerified Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  name       String?
+  street2    String?
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("addresses")
+}
+
+model PaymentMethod {
+  id              String   @id @default(cuid())
+  userId          String
+  type            String   @default("card")
+  brand           String?
+  last4           String?
+  expMonth        Int?
+  expYear         Int?
+  cloverToken     String?
+  isDefault       Boolean  @default(false)
+  nickname        String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  expiryMonth     Int?
+  expiryYear      Int?
+  provider        String?
+  providerTokenId String?
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("payment_methods")
+}
+
+model NotificationPreference {
+  id           Int      @id @default(autoincrement())
+  userId       String?  @unique
+  sellerId     Int?     @unique
+  emailEnabled Boolean  @default(true)
+  smsEnabled   Boolean  @default(false)
+  pushEnabled  Boolean  @default(true)
+  inAppEnabled Boolean  @default(true)
+  orderUpdates Boolean  @default(true)
+  promotions   Boolean  @default(true)
+  systemAlerts Boolean  @default(true)
+  phoneNumber  String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  channel      String?
+  enabled      Boolean  @default(true)
+  type         String?
+
+  @@map("notification_preferences")
+}
+
+model CmsBlock {
+  id          Int       @id @default(autoincrement())
+  key         String    @unique
+  name        String?
+  type        String?
+  title       String?
+  subtitle    String?
+  content     String?
+  imageUrl    String?
+  linkUrl     String?
+  linkText    String?
+  metadata    Json?
+  order       Int?      @default(0)
+  isActive    Boolean   @default(true)
+  startDate   DateTime?
+  endDate     DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  contentHtml String?
+  contentJson Json?
+
+  @@map("cms_blocks")
+}
+
+model FooterLink {
+  id           Int      @id @default(autoincrement())
+  title        String?
+  url          String
+  section      String
+  order        Int      @default(0)
+  isActive     Boolean  @default(true)
+  openInNewTab Boolean  @default(false)
+  icon         String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  label        String?
+  sortOrder    Int      @default(0)
+
+  @@map("footer_links")
+}
+
+model FooterContent {
+  id        Int      @id @default(autoincrement())
+  key       String   @unique
+  content   String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  value     String?
+
+  @@map("footer_content")
+}
+
+model CategoryMapping {
+  id               Int      @id @default(autoincrement())
+  priority         Int      @default(0)
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  confidence       Float?   @default(1.0)
+  sourceName       String   @default("")
+  targetCategoryId Int?     @default(0)
+
+  @@map("category_mappings")
+}
+
+model FilterConfig {
+  id           Int      @id @default(autoincrement())
+  categorySlug String?
+  filterKey    String
+  displayName  String?
+  filterType   String   @default("checkbox")
+  sortOrder    Int      @default(0)
+  isActive     Boolean  @default(true)
+  options      Json?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  categoryId   Int?
+  filterLabel  String?
+
+  @@map("filter_configs")
+}
+
+model ProductAttribute {
+  id        Int      @id @default(autoincrement())
+  productId Int
+  key       String
+  value     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId], map: "idx_prodattr_product")
+  @@map("product_attributes")
+}
+
+model AIEnrichmentLog {
+  id              Int       @id @default(autoincrement())
+  productId       Int
+  enrichmentType  String
+  status          String    @default("pending")
+  inputPrompt     String?
+  outputRaw       String?
+  outputParsed    Json?
+  modelUsed       String?
+  tokensUsed      Int?
+  latencyMs       Int?
+  moderationScore Float?
+  moderationFlags String[]  @default([])
+  moderatedAt     DateTime?
+  errorMessage    String?
+  reviewedBy      Int?
+  reviewedAt      DateTime?
+  reviewAction    String?
+  reviewNotes     String?
+  createdAt       DateTime  @default(now())
+  durationMs      Int?
+  errorMsg        String?
+  inputData       Json?
+  outputData      Json?
+  product         Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@map("ai_enrichment_logs")
+}
+
+model Favorite {
+  id        Int      @id @default(autoincrement())
+  userId    String
+  productId Int
+  createdAt DateTime @default(now())
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, productId])
+  @@map("favorites")
+}
+
+model Referral {
+  id                  Int       @id @default(autoincrement())
+  referrerId          String
+  referredId          String?
+  referralCode        String    @unique
+  referredEmail       String?
+  referredName        String?
+  status              String    @default("pending")
+  channel             String?
+  referrerRewardCents Int       @default(2500)
+  referredRewardCents Int       @default(1000)
+  qualifyingOrderId   Int?
+  paidOut             Boolean   @default(false)
+  paidOutAt           DateTime?
+  expiresAt           DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  completedAt         DateTime?
+  referred            User?     @relation("ReferredByReferrals", fields: [referredId], references: [id])
+  referrer            User      @relation("ReferrerReferrals", fields: [referrerId], references: [id], onDelete: Cascade)
+
+  @@index([referrerId])
+  @@index([referredId])
+  @@index([referralCode])
+  @@index([status])
+  @@map("referrals")
+}
+
+model Unit {
+  id               Int       @id @default(autoincrement())
+  name             String
+  abbreviation     String
+  category         String
+  baseUnit         String
+  conversionFactor Float
+  sortOrder        Int
+  isActive         Boolean   @default(true)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime? @updatedAt
+
+  @@map("units")
+}
+
+model product_universe {
+  id                   Int       @id @default(autoincrement())
+  name                 String
+  slug                 String    @unique
+  brand                String?
+  upc                  String?
+  description          String?
+  image_url            String?
+  category             String?
+  subcategory          String?
+  cuisine              String?
+  tags                 String[]
+  in_inventory         Boolean?  @default(false)
+  inventory_product_id Int?
+  walmart_available    Boolean?  @default(false)
+  walmart_url          String?
+  walmart_price_cents  Int?
+  storesgo_price_cents Int?
+  search_count         Int?      @default(0)
+  waitlist_count       Int?      @default(0)
+  last_searched_at     DateTime? @db.Timestamp(6)
+  meta_title           String?
+  meta_description     String?
+  created_at           DateTime? @default(now()) @db.Timestamp(6)
+  updated_at           DateTime? @default(now()) @db.Timestamp(6)
+
+  @@index([inventory_product_id], map: "idx_universe_inventory_product")
+  @@index([slug], map: "idx_universe_slug")
+  @@index([walmart_available], map: "idx_universe_walmart")
+}
+
+model product_waitlist {
+  id                  Int       @id @default(autoincrement())
+  product_universe_id Int?
+  user_id             String?   @db.VarChar(30)
+  email               String?
+  city                String?
+  notified            Boolean?  @default(false)
+  created_at          DateTime? @default(now()) @db.Timestamp(6)
+}
+
+model referral_credit_transactions {
+  id               Int       @id @default(autoincrement())
+  user_id          String?   @db.VarChar(30)
+  amount           Decimal   @db.Decimal(10, 2)
+  balance_after    Decimal   @db.Decimal(10, 2)
+  transaction_type String    @db.VarChar(30)
+  referral_id      Int?
+  order_id         Int?
+  notes            String?
+  created_at       DateTime? @default(now()) @db.Timestamptz(6)
+}
+
+model referral_redemptions {
+  id                  Int       @id @default(autoincrement())
+  referrer_user_id    String?   @db.VarChar(30)
+  referrer_code       String    @db.VarChar(10)
+  referred_user_id    String?   @db.VarChar(30)
+  referred_email      String?   @db.VarChar(255)
+  referred_credit     Decimal?  @default(10.00) @db.Decimal(10, 2)
+  referrer_credit     Decimal?  @default(10.00) @db.Decimal(10, 2)
+  status              String?   @default("pending") @db.VarChar(20)
+  created_at          DateTime? @default(now()) @db.Timestamptz(6)
+  first_order_at      DateTime? @db.Timestamptz(6)
+  credited_at         DateTime? @db.Timestamptz(6)
+  qualifying_order_id Int?
+}
+
+enum ShippingMode {
+  LIVE
+  FREE
+  FLAT
+  LOCAL
+}
+
+enum UserRole {
+  BUYER
+  SELLER
+  ADMIN
+}
+
+// ============================================================================
+// Agent Suite (Phase 0 Part B) — added 2026-04-08
+// All models prefixed with Ai, all tables prefixed with ai_
+// See docs/agent-audit.md section 8 for naming collision rationale
+// ============================================================================
+
+enum AiChannel {
+  chat
+  voice
+  email
+  whatsapp
+  sms
+  webhook
+}
+
+enum AiConversationStatus {
+  active
+  resolved
+  abandoned
+  escalated
+  error
+}
+
+enum AiMessageRole {
+  system
+  user
+  assistant
+  tool
+}
+
+enum AiToolCallStatus {
+  pending
+  success
+  error
+  timeout
+}
+
+enum AiAutonomyLevel {
+  L0
+  L1
+  L2
+  L3
+}
+
+model AiCustomerIdentity {
+  id                String   @id @default(cuid())
+  displayName       String?
+  preferredLanguage String?
+  firstSeenAt       DateTime @default(now())
+  lastSeenAt        DateTime @default(now())
+  metadata          Json?
+
+  aliases           AiIdentityAlias[]
+  conversations     AiConversation[]
+
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@map("ai_customer_identities")
+}
+
+model AiIdentityAlias {
+  id         String    @id @default(cuid())
+  identityId String
+  channel    AiChannel
+  value      String
+  verifiedAt DateTime?
+
+  identity   AiCustomerIdentity @relation(fields: [identityId], references: [id], onDelete: Cascade)
+
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([channel, value])
+  @@index([identityId])
+  @@map("ai_identity_aliases")
+}
+
+model AiConversation {
+  id              String               @id @default(cuid())
+  identityId      String?
+  channel         AiChannel
+  featureKey      String
+  status          AiConversationStatus @default(active)
+
+  externalId      String?
+  totalTokensUsed Int                  @default(0)
+  totalCostUsd    Decimal              @default(0) @db.Decimal(10, 6)
+  messageCount    Int                  @default(0)
+
+  startedAt       DateTime             @default(now())
+  lastMessageAt   DateTime             @default(now())
+  closedAt        DateTime?
+
+  metadata        Json?
+
+  identity        AiCustomerIdentity?  @relation(fields: [identityId], references: [id], onDelete: SetNull)
+  messages        AiMessage[]
+
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  @@index([identityId])
+  @@index([channel, status])
+  @@index([featureKey, status])
+  @@index([lastMessageAt])
+  @@map("ai_conversations")
+}
+
+model AiMessage {
+  id             String        @id @default(cuid())
+  conversationId String
+  role           AiMessageRole
+  content        String        @db.Text
+
+  provider       String?
+  model          String?
+  tokensIn       Int           @default(0)
+  tokensOut      Int           @default(0)
+  costUsd        Decimal       @default(0) @db.Decimal(10, 6)
+  finishReason   String?
+  promptHash     String?
+
+  conversation   AiConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  toolCalls      AiToolCall[]
+
+  createdAt      DateTime      @default(now())
+
+  @@index([conversationId, createdAt])
+  @@map("ai_messages")
+}
+
+model AiToolCall {
+  id                        String           @id @default(cuid())
+  messageId                 String
+  toolName                  String
+  argsJson                  Json
+  resultJson                Json?
+  status                    AiToolCallStatus @default(pending)
+  errorMessage              String?          @db.Text
+  durationMs                Int?
+  autonomyLevelAtExecution  AiAutonomyLevel
+
+  message                   AiMessage        @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  createdAt                 DateTime         @default(now())
+  updatedAt                 DateTime         @updatedAt
+
+  @@index([messageId])
+  @@index([toolName, status])
+  @@index([createdAt])
+  @@map("ai_tool_calls")
+}
+
+model AiAutonomyState {
+  id              String          @id @default(cuid())
+  featureKey      String          @unique
+  currentLevel    AiAutonomyLevel @default(L0)
+
+  evalScoreAvg    Decimal         @default(0) @db.Decimal(4, 2)
+  totalExecutions Int             @default(0)
+  successCount    Int             @default(0)
+  errorCount      Int             @default(0)
+  costBudgetCents Int?            @default(50000)
+
+  lastPromotedAt  DateTime?
+  promotedBy      String?
+  notes           String?         @db.Text
+
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  @@map("ai_autonomy_states")
+}

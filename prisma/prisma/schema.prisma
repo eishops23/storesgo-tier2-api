@@ -1,0 +1,281 @@
+import { prisma } from "../plugins/prisma.js";
+import { getPagination } from "../utils/pagination.js";
+import type { ProductListQuery } from "../schemas/products.schema.js";
+import type { Prisma } from "@prisma/client";
+
+/**
+ * Build WHERE conditions for product listing
+ */
+function buildWhere(query: ProductListQuery): Prisma.productsWhereInput {
+  const where: Prisma.productsWhereInput = {
+    status: "active",
+  };
+
+  // Search text (q)
+  if (query.q?.trim()) {
+    const q = query.q.trim();
+    where.OR = [
+      { name: { contains: q, mode: "insensitive" } },
+      { description: { contains: q, mode: "insensitive" } },
+      { externalId: { contains: q, mode: "insensitive" } },
+    ];
+  }
+
+  // Filter by seller
+  if (query.sellerId) {
+    where.sellerId = query.sellerId;
+  }
+
+  // API still calls it categoryId, but DB uses taxonomyId
+  if (query.categoryId) {
+    where.taxonomyId = query.categoryId;
+  }
+
+  // Price filter
+  if (query.minPrice || query.maxPrice) {
+    where.priceCents = {};
+
+    if (query.minPrice) {
+      where.priceCents!.gte = Math.round(query.minPrice * 100);
+    }
+    if (query.maxPrice) {
+      where.priceCents!.lte = Math.round(query.maxPrice * 100);
+    }
+  }
+
+  return where;
+}
+
+/**
+ * Sorting options
+ */
+function buildOrderBy(
+  sort?: string
+): Prisma.productsOrderByWithRelationInput {
+  switch (sort) {
+    case "price_asc":
+      return { priceCents: "asc" };
+    case "price_desc":
+      return { priceCents: "desc" };
+    case "name_asc":
+      return { name: "asc" };
+    case "name_desc":
+      return { name: "desc" };
+    case "newest":
+      return { createdAt: "desc" };
+    default:
+      return { createdAt: "desc" };
+  }
+}
+
+/**
+ * List all products with filtering, sorting, pagination
+ */
+export async function listProducts(rawQuery: any) {
+  const query: ProductListQuery = {
+    page: rawQuery.page ? Number(rawQuery.page) : undefined,
+    pageSize: rawQuery.pageSize ? Number(rawQuery.pageSize) : undefined,
+    q: rawQuery.q ? String(rawQuery.q) : undefined,
+    sellerId: rawQuery.sellerId ? Number(rawQuery.sellerId) : undefined,
+    categoryId: rawQuery.categoryId ? Number(rawQuery.categoryId) : undefined,
+    minPrice: rawQuery.minPrice ? Number(rawQuery.minPrice) : undefined,
+    maxPrice: rawQuery.maxPrice ? Number(rawQuery.maxPrice) : undefined,
+    sort: rawQuery.sort,
+  };
+
+  const pagination = getPagination({
+    page: query.page,
+    pageSize: query.pageSize,
+    maxPageSize: 100,
+  });
+
+  const where = buildWhere(query);
+  const orderBy = buildOrderBy(query.sort);
+
+  const [items, total] = await Promise.all([
+    prisma.products.findMany({
+      where,
+      orderBy,
+      skip: pagination.skip,
+      take: pagination.take,
+      include: {
+        sellers: {
+          select: {
+            id: true,
+            storeName: true,
+          },
+        },
+        taxonomy: {
+          select: {
+            id: true,
+            name: true, // ← FINAL SCHEMA USES "name", NOT "title"
+            slug: true,
+          },
+        },
+      },
+    }),
+
+    prisma.products.count({ where }),
+  ]);
+
+  return {
+    items,
+    total,
+    page: pagination.page,
+    pageSize: pagination.pageSize,
+  };
+}
+
+/**
+ * Get a single product by ID
+ */
+export async function getProductById(id: number) {
+  const product = await prisma.products.findUnique({
+    where: { id },
+    include: {
+      sellers: {
+        select: { id: true, storeName: true },
+      },
+      taxonomy: {
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+        },
+      },
+    },
+  });
+
+  if (!product) {
+    const err: any = new Error("Product not found");
+    err.statusCode = 404;
+    throw err;
+  }
+
+  return product;
+}
+
+/**
+ * Products by seller
+ */
+export async function getProductsBySeller(
+  sellerId: number,
+  rawQuery: any
+) {
+  return listProducts({ ...rawQuery, sellerId });
+}
+
+/**
+ * Products by taxonomy (API still uses “categoryId”)
+ */
+export async function getProductsByCategory(
+  categoryId: number,
+  rawQuery: any
+) {
+  return listProducts({ ...rawQuery, categoryId });
+}
+
+/**
+ * Search only by query string
+ */
+export async function searchProducts(rawQuery: any) {
+  if (!rawQuery.q || String(rawQuery.q).trim().length === 0) {
+    const err: any = new Error("Query parameter q is required");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const query: ProductListQuery = {
+    page: rawQuery.page ? Number(rawQuery.page) : 1,
+    pageSize: rawQuery.pageSize ? Number(rawQuery.pageSize) : 20,
+    q: String(rawQuery.q),
+  };
+
+  const pagination = getPagination({
+    page: query.page,
+    pageSize: query.pageSize,
+    maxPageSize: 50,
+  });
+
+  const where = buildWhere(query);
+
+  const [items, total] = await Promise.all([
+    prisma.products.findMany({
+      where,
+      orderBy: { createdAt: "desc" },
+      skip: pagination.skip,
+      take: pagination.take,
+      include: {
+        sellers: {
+          select: { id: true, storeName: true },
+        },
+        taxonomy: {
+          select: {
+            id: true,
+            name: true,
+            slug: true,
+          },
+        },
+      },
+    }),
+
+    prisma.products.count({ where }),
+  ]);
+
+  return {
+    items,
+    total,
+    page: pagination.page,
+    pageSize: pagination.pageSize,
+  };
+}
+
+/**
+ * Recommended products (same taxonomy)
+ */
+export async function getRecommendedProducts(
+  productId: number,
+  limit = 8
+) {
+  const product = await prisma.products.findUnique({
+    where: { id: productId },
+  });
+
+  if (!product) {
+    const err: any = new Error("Product not found");
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const where: Prisma.productsWhereInput = {
+    id: { not: productId },
+    status: "active",
+  };
+
+  if (product.taxonomyId) {
+    where.taxonomyId = product.taxonomyId;
+  }
+
+  const items = await prisma.products.findMany({
+    where,
+    take: limit,
+    orderBy: { createdAt: "desc" },
+    include: {
+      taxonomy: {
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+        },
+      },
+      sellers: {
+        select: {
+          id: true,
+          storeName: true,
+        },
+      },
+    },
+  });
+
+  return items;
+}

@@ -1,0 +1,12 @@
+# =============================================================================
+# 🏷️ KUBERNETES NAMESPACE — STORESGO BACKEND
+# =============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: storesgo-prod
+  labels:
+    app.kubernetes.io/name: storesgo
+    app.kubernetes.io/component: backend
+    environment: production
+

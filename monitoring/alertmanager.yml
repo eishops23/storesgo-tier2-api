@@ -1,0 +1,181 @@
+# =============================================================================
+# 🔔 ALERTMANAGER CONFIGURATION — STORESGO BACKEND
+# Alert routing, grouping, and notification configuration
+# =============================================================================
+
+global:
+  # SMTP configuration for email alerts
+  smtp_smarthost: 'smtp.gmail.com:587'
+  smtp_from: 'alerts@storesgo.com'
+  smtp_auth_username: '${SMTP_USER}'
+  smtp_auth_password: '${SMTP_PASS}'
+  smtp_require_tls: true
+
+  # Slack configuration
+  slack_api_url: '${SLACK_WEBHOOK_URL}'
+
+  # Default resolve timeout
+  resolve_timeout: 5m
+
+# =============================================================================
+# Alert Templates
+# =============================================================================
+templates:
+  - '/etc/alertmanager/templates/*.tmpl'
+
+# =============================================================================
+# Routing Tree
+# =============================================================================
+route:
+  # Default receiver
+  receiver: 'slack-notifications'
+  
+  # Group alerts by these labels
+  group_by: ['alertname', 'service', 'severity']
+  
+  # Wait time before sending first notification for a group
+  group_wait: 30s
+  
+  # Wait time before sending subsequent notifications
+  group_interval: 5m
+  
+  # Wait time before resending notification for unchanged alert
+  repeat_interval: 4h
+
+  # Child routes for specific alert handling
+  routes:
+    # -------------------------------------------------------------------------
+    # Critical alerts → PagerDuty + Slack + Email
+    # -------------------------------------------------------------------------
+    - match:
+        severity: critical
+      receiver: 'critical-alerts'
+      group_wait: 10s
+      repeat_interval: 1h
+      continue: true
+
+    # -------------------------------------------------------------------------
+    # Warning alerts → Slack only
+    # -------------------------------------------------------------------------
+    - match:
+        severity: warning
+      receiver: 'slack-notifications'
+      group_wait: 1m
+      repeat_interval: 4h
+
+    # -------------------------------------------------------------------------
+    # Database alerts → DBA team
+    # -------------------------------------------------------------------------
+    - match:
+        service: postgres
+      receiver: 'dba-team'
+      group_wait: 30s
+
+    # -------------------------------------------------------------------------
+    # Infrastructure alerts → DevOps team
+    # -------------------------------------------------------------------------
+    - match:
+        service: infrastructure
+      receiver: 'devops-team'
+
+# =============================================================================
+# Receivers (Notification Channels)
+# =============================================================================
+receivers:
+  # ---------------------------------------------------------------------------
+  # Default Slack notifications
+  # ---------------------------------------------------------------------------
+  - name: 'slack-notifications'
+    slack_configs:
+      - channel: '#storesgo-alerts'
+        send_resolved: true
+        title: '{{ .Status | toUpper }}: {{ .CommonLabels.alertname }}'
+        text: >-
+          {{ range .Alerts }}
+          *Alert:* {{ .Annotations.summary }}
+          *Description:* {{ .Annotations.description }}
+          *Severity:* {{ .Labels.severity }}
+          *Service:* {{ .Labels.service }}
+          {{ end }}
+        color: '{{ if eq .Status "firing" }}danger{{ else }}good{{ end }}'
+
+  # ---------------------------------------------------------------------------
+  # Critical alerts - multiple channels
+  # ---------------------------------------------------------------------------
+  - name: 'critical-alerts'
+    slack_configs:
+      - channel: '#storesgo-critical'
+        send_resolved: true
+        title: '🚨 CRITICAL: {{ .CommonLabels.alertname }}'
+        text: >-
+          {{ range .Alerts }}
+          *Alert:* {{ .Annotations.summary }}
+          *Description:* {{ .Annotations.description }}
+          *Service:* {{ .Labels.service }}
+          *Time:* {{ .StartsAt }}
+          {{ if .Annotations.runbook_url }}*Runbook:* {{ .Annotations.runbook_url }}{{ end }}
+          {{ end }}
+        color: 'danger'
+    
+    email_configs:
+      - to: 'oncall@storesgo.com'
+        send_resolved: true
+        headers:
+          Subject: '🚨 CRITICAL: {{ .CommonLabels.alertname }} - StoresGo Backend'
+
+    # Uncomment and configure for PagerDuty
+    # pagerduty_configs:
+    #   - service_key: '${PAGERDUTY_SERVICE_KEY}'
+    #     severity: 'critical'
+
+  # ---------------------------------------------------------------------------
+  # DBA Team notifications
+  # ---------------------------------------------------------------------------
+  - name: 'dba-team'
+    slack_configs:
+      - channel: '#storesgo-dba'
+        send_resolved: true
+        title: '🗄️ Database Alert: {{ .CommonLabels.alertname }}'
+        text: >-
+          {{ range .Alerts }}
+          *Alert:* {{ .Annotations.summary }}
+          *Description:* {{ .Annotations.description }}
+          {{ end }}
+    
+    email_configs:
+      - to: 'dba@storesgo.com'
+        send_resolved: true
+
+  # ---------------------------------------------------------------------------
+  # DevOps Team notifications
+  # ---------------------------------------------------------------------------
+  - name: 'devops-team'
+    slack_configs:
+      - channel: '#storesgo-devops'
+        send_resolved: true
+        title: '⚙️ Infrastructure Alert: {{ .CommonLabels.alertname }}'
+        text: >-
+          {{ range .Alerts }}
+          *Alert:* {{ .Annotations.summary }}
+          *Description:* {{ .Annotations.description }}
+          *Instance:* {{ .Labels.instance }}
+          {{ end }}
+
+# =============================================================================
+# Inhibition Rules
+# =============================================================================
+inhibit_rules:
+  # If the API is completely down, suppress individual endpoint alerts
+  - source_match:
+      alertname: 'APIDown'
+    target_match_re:
+      alertname: 'High.*|.*Failing'
+    equal: ['service']
+
+  # If there's critical CPU/memory, suppress warning alerts
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname', 'instance']
+

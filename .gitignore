@@ -1,0 +1,60 @@
+﻿# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Environment files (NEVER commit secrets)
+.env
+.env.local
+.env.production
+.env.*.local
+.env.backup*
+.env.bak*
+.env.temp
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Uploads
+uploads/
+
+# Editor / tooling
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Aider artifacts
+.aider*
+
+# Backups
+*.bak
+*.bak[0-9]*
+*.backup
+*.backup.[0-9]*
+*.save
+*.save.[0-9]*
+*.broken
+*.deprecated
+*.BACKUP.*
+*.BAK_BEFORE_*
+
+# Build artifacts and test output
+tsconfig.tsbuildinfo
+
+# Data files (large JSON dumps from migrations)
+walmart-products*.json
+walmart-*-rollback.json
+
+# Random artifacts from typos
+/0
+/=
+/sr
+/stop
+
+# OS
+Thumbs.db

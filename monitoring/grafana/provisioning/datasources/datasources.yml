@@ -1,0 +1,26 @@
+# =============================================================================
+# 📊 GRAFANA DATASOURCES PROVISIONING — STORESGO BACKEND
+# =============================================================================
+apiVersion: 1
+
+datasources:
+  # Prometheus datasource for metrics
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: "15s"
+      httpMethod: POST
+
+  # Alertmanager for alert management
+  - name: Alertmanager
+    type: alertmanager
+    access: proxy
+    url: http://alertmanager:9093
+    editable: false
+    jsonData:
+      implementation: prometheus
+

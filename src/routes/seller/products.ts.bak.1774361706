@@ -1,0 +1,247 @@
+// ==========================================================
+import { generateProductSlug } from "../../utils/slug.js";
+import { assignProductToSubcategory } from "../../services/subcategoryAssignment.service.js";
+import { autoCategorizeProduct } from "../../services/categorization.service.js";
+// STORESGO SELLER PRODUCTS ROUTES
+// Industry-standard CRUD for sellers to manage their own products
+// ==========================================================
+import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+import { authenticateSeller } from "../../middleware/authSeller.js";
+import { prisma } from "../../lib/prisma.js";
+import { MeiliSearch } from "meilisearch";
+const meili = new MeiliSearch({ host: "http://127.0.0.1:7700", apiKey: process.env.MEILI_MASTER_KEY || "ff6c780c6c9cfd9156cd7831e86a49b21cbde1ece9d55dc9b2fcb11ef8b63482" });
+const productsIndex = meili.index("products");
+
+interface CreateProductBody {
+  name: string;
+  description?: string;
+  priceCents: number;
+  categoryId?: number;
+  sku?: string;
+  imageUrl?: string;
+  isActive?: boolean;
+  unitId?: number;
+  unitQuantity?: number;
+}
+
+interface UpdateProductBody {
+  name?: string;
+  description?: string;
+  priceCents?: number;
+  categoryId?: number;
+  sku?: string;
+  imageUrl?: string;
+  isActive?: boolean;
+  unitId?: number;
+  unitQuantity?: number;
+}
+
+interface ListQuery {
+  page?: string;
+  pageSize?: string;
+  search?: string;
+  categoryId?: string;
+  isActive?: string;
+  sort?: string;
+}
+
+export default async function sellerProductsRoutes(app: FastifyInstance) {
+  app.addHook("preHandler", authenticateSeller);
+
+  // LIST SELLER'S PRODUCTS - GET /api/seller/products
+  app.get("/", async (request: FastifyRequest, reply: FastifyReply) => {
+    const sellerId = (request.user as any)?.sellerId;
+    if (!sellerId) return reply.code(403).send({ ok: false, error: "Seller ID not found" });
+
+    const query = request.query as ListQuery;
+    const page = Number(query.page) || 1;
+    const pageSize = Math.min(Number(query.pageSize) || 20, 100);
+    const skip = (page - 1) * pageSize;
+
+    const where: any = { sellerId };
+    if (query.search) {
+      where.OR = [
+        { name: { contains: query.search, mode: "insensitive" } },
+        { sku: { contains: query.search, mode: "insensitive" } },
+      ];
+    }
+    if (query.categoryId) where.categoryId = Number(query.categoryId);
+    if (query.isActive !== undefined) where.isActive = query.isActive === "true";
+
+    let orderBy: any = { updatedAt: "desc" };
+    switch (query.sort) {
+      case "name_asc": orderBy = { name: "asc" }; break;
+      case "name_desc": orderBy = { name: "desc" }; break;
+      case "price_asc": orderBy = { priceCents: "asc" }; break;
+      case "price_desc": orderBy = { priceCents: "desc" }; break;
+      case "newest": orderBy = { createdAt: "desc" }; break;
+    }
+
+    const [products, total] = await Promise.all([
+      prisma.product.findMany({ where, skip, take: pageSize, orderBy,
+        include: { category: { select: { id: true, name: true, slug: true } } },
+      }),
+      prisma.product.count({ where }),
+    ]);
+
+    return reply.send({
+      ok: true, data: products,
+      pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) },
+    });
+  });
+
+  // GET STATS - GET /api/seller/products/stats
+  app.get("/stats", async (request: FastifyRequest, reply: FastifyReply) => {
+    const sellerId = (request.user as any)?.sellerId;
+    if (!sellerId) return reply.code(403).send({ ok: false, error: "Seller ID not found" });
+
+    const [total, active, inactive, pending] = await Promise.all([
+      prisma.product.count({ where: { sellerId } }),
+      prisma.product.count({ where: { sellerId, isActive: true } }),
+      prisma.product.count({ where: { sellerId, isActive: false } }),
+      prisma.product.count({ where: { sellerId, status: "pending" } }),
+    ]);
+
+    return reply.send({ ok: true, data: { total, active, inactive, pending } });
+  });
+
+  // GET SINGLE PRODUCT - GET /api/seller/products/:id
+  app.get("/:id", async (request: FastifyRequest, reply: FastifyReply) => {
+    const sellerId = (request.user as any)?.sellerId;
+    const { id } = request.params as { id: string };
+
+    const product = await prisma.product.findFirst({
+      where: { id: Number(id), sellerId },
+      include: { category: { select: { id: true, name: true, slug: true } } },
+    });
+
+    if (!product) return reply.code(404).send({ ok: false, error: "Product not found" });
+    return reply.send({ ok: true, data: product });
+  });
+
+  // CREATE PRODUCT - POST /api/seller/products
+  app.post("/", async (request: FastifyRequest, reply: FastifyReply) => {
+    const sellerId = (request.user as any)?.sellerId;
+    if (!sellerId) return reply.code(403).send({ ok: false, error: "Seller ID not found" });
+
+    const body = request.body as CreateProductBody;
+    if (!body.name || body.name.trim().length < 2) {
+      return reply.code(400).send({ ok: false, error: "Product name required (min 2 chars)" });
+    }
+    if (!body.priceCents || body.priceCents < 0) {
+      return reply.code(400).send({ ok: false, error: "Valid price required" });
+    }
+    // Auto-categorize if no category provided
+    let finalCategoryId = body.categoryId;
+    if (!finalCategoryId) {
+      const autoResult = await autoCategorizeProduct(body.name, body.description);
+      if (autoResult.categoryId) {
+        finalCategoryId = autoResult.categoryId;
+        app.log.info("🤖 Auto-categorized: " + body.name + " (confidence: " + autoResult.confidence + ")");
+      } else {
+        const fallback = await prisma.category.findUnique({ where: { slug: "household-essentials" } });
+        finalCategoryId = fallback?.id || 1;
+        app.log.info("🤖 No category match for: " + body.name + ", using fallback");
+      }
+    } else {
+      const category = await prisma.category.findUnique({ where: { id: body.categoryId } });
+      if (!category) return reply.code(400).send({ ok: false, error: "Invalid category" });
+    }
+
+    const product = await prisma.product.create({
+      data: {
+        name: body.name.trim(),
+        description: body.description || "",
+        priceCents: body.priceCents,
+        categoryId: finalCategoryId,
+        sellerId,
+        sku: body.sku || null,
+        imageUrl: body.imageUrl || null,
+        isActive: body.isActive ?? false,
+        unitId: body.unitId || null,
+        unitQuantity: body.unitQuantity || null,
+        status: "pending", // New products pending review
+      },
+      include: { category: { select: { id: true, name: true, slug: true } } },
+    });
+
+    // Generate SEO-friendly slug with product ID
+    const updatedProduct = await prisma.product.update({
+      where: { id: product.id },
+      data: { slug: generateProductSlug(product.name, product.id) },
+      include: { category: { select: { id: true, name: true, slug: true } } },
+    });
+
+    app.log.info(`📦 Seller ${sellerId} created product: ${product.name} (ID: ${product.id})`);
+    return reply.code(201).send({ ok: true, data: updatedProduct, message: "Product created" });
+  });
+
+  // UPDATE PRODUCT - PATCH /api/seller/products/:id
+  app.patch("/:id", async (request: FastifyRequest, reply: FastifyReply) => {
+    const sellerId = (request.user as any)?.sellerId;
+    const { id } = request.params as { id: string };
+    const body = request.body as UpdateProductBody;
+
+    const existing = await prisma.product.findFirst({ where: { id: Number(id), sellerId } });
+    if (!existing) return reply.code(404).send({ ok: false, error: "Product not found" });
+
+    const updateData: any = {};
+    if (body.name !== undefined) updateData.name = body.name.trim();
+    if (body.description !== undefined) updateData.description = body.description;
+    if (body.priceCents !== undefined) updateData.priceCents = body.priceCents;
+    if (body.categoryId !== undefined) updateData.categoryId = body.categoryId;
+    if (body.sku !== undefined) updateData.sku = body.sku;
+    if (body.imageUrl !== undefined) updateData.imageUrl = body.imageUrl;
+    if (body.isActive !== undefined) updateData.isActive = body.isActive;
+    if (body.unitId !== undefined) updateData.unitId = body.unitId;
+    if (body.unitQuantity !== undefined) updateData.unitQuantity = body.unitQuantity;
+
+    const product = await prisma.product.update({
+      where: { id: Number(id) }, data: updateData,
+      include: { category: { select: { id: true, name: true, slug: true } } },
+    });
+
+    app.log.info(`📦 Seller ${sellerId} updated product: ${product.name}`);
+    // Sync updated product to Meilisearch
+    try {
+      const cat = product.category;
+      await productsIndex.updateDocuments([{
+        id: product.id, name: product.name, slug: product.slug,
+        description: product.description || "", priceCents: product.priceCents,
+        imageUrl: product.imageUrl || "", isActive: product.isActive,
+        categoryName: cat?.name || "", categorySlug: cat?.slug || "", categoryId: cat?.id || 0,
+      }]);
+    } catch (e: any) { app.log.error("Meilisearch sync failed: " + e.message); }
+    return reply.send({ ok: true, data: product });
+  });
+
+  // DELETE PRODUCT - DELETE /api/seller/products/:id
+  app.delete("/:id", async (request: FastifyRequest, reply: FastifyReply) => {
+    const sellerId = (request.user as any)?.sellerId;
+    const { id } = request.params as { id: string };
+
+    const existing = await prisma.product.findFirst({ where: { id: Number(id), sellerId } });
+    if (!existing) return reply.code(404).send({ ok: false, error: "Product not found" });
+
+    await prisma.product.update({ where: { id: Number(id) }, data: { isActive: false, status: "deleted" } });
+    app.log.info(`📦 Seller ${sellerId} deleted product: ${existing.name}`);
+    return reply.send({ ok: true, message: "Product deleted" });
+  });
+
+  // TOGGLE ACTIVE - PATCH /api/seller/products/:id/toggle
+  app.patch("/:id/toggle", async (request: FastifyRequest, reply: FastifyReply) => {
+    const sellerId = (request.user as any)?.sellerId;
+    const { id } = request.params as { id: string };
+
+    const existing = await prisma.product.findFirst({ where: { id: Number(id), sellerId } });
+    if (!existing) return reply.code(404).send({ ok: false, error: "Product not found" });
+
+    const product = await prisma.product.update({
+      where: { id: Number(id) }, data: { isActive: !existing.isActive },
+      select: { id: true, name: true, isActive: true },
+    });
+    return reply.send({ ok: true, data: product });
+  });
+
+  app.log.info("📦 Seller products CRUD routes registered");
+}

@@ -1,0 +1,556 @@
+/**
+ * Bulk Upload Service for Products
+ * Handles CSV/XLSX file parsing and product import
+ */
+
+import { prisma } from "../plugins/prisma.js";
+import { Readable } from "stream";
+import { generateProductSlug } from "../utils/slug.js";
+import { autoCategorizeProduct } from "../services/categorization.service.js";
+import { assignProductToSubcategory } from "./subcategoryAssignment.service.js";
+
+// Product import row interface
+export interface ProductImportRow {
+  name: string;
+  description?: string;
+  sku?: string;
+  externalId?: string;
+  priceCents: number;
+  price?: number; // Alternative: price in dollars
+  imageUrl?: string;
+  categoryId?: number;
+  categoryName?: string;
+  categorySlug?: string;
+  status?: string;
+  isActive?: boolean;
+  shippingWeightGrams?: number;
+  shippingMode?: "LIVE" | "FREE" | "FLAT" | "LOCAL";
+  flatRateAmount?: number;
+  freeShipping?: boolean;
+}
+
+// Validation result
+export interface ValidationResult {
+  valid: boolean;
+  errors: string[];
+  warnings: string[];
+}
+
+// Import result
+export interface BulkImportResult {
+  success: boolean;
+  totalRows: number;
+  imported: number;
+  failed: number;
+  skipped: number;
+  errors: Array<{ row: number; errors: string[] }>;
+  warnings: Array<{ row: number; warnings: string[] }>;
+}
+
+// Required columns for product import
+const REQUIRED_COLUMNS = ["name", "priceCents"];
+const ALTERNATIVE_PRICE_COLUMNS = ["price", "priceUSD", "priceInDollars"];
+
+// Valid column names (case-insensitive matching)
+const VALID_COLUMNS = [
+  "name",
+  "description",
+  "sku",
+  "externalId",
+  "external_id",
+  "priceCents",
+  "price_cents",
+  "price",
+  "priceUSD",
+  "imageUrl",
+  "image_url",
+  "image",
+  "categoryId",
+  "category_id",
+  "categoryName",
+  "category_name",
+  "categorySlug",
+  "category_slug",
+  "status",
+  "isActive",
+  "is_active",
+  "active",
+  "shippingWeightGrams",
+  "shipping_weight_grams",
+  "weight",
+  "shippingMode",
+  "shipping_mode",
+  "flatRateAmount",
+  "flat_rate_amount",
+  "freeShipping",
+  "free_shipping",
+];
+
+/**
+ * Normalize column name to camelCase
+ */
+function normalizeColumnName(col: string): string {
+  const normalized = col.trim().toLowerCase();
+  
+  const columnMap: Record<string, string> = {
+    "name": "name",
+    "description": "description",
+    "sku": "sku",
+    "externalid": "externalId",
+    "external_id": "externalId",
+    "pricecents": "priceCents",
+    "price_cents": "priceCents",
+    "price": "price",
+    "priceusd": "price",
+    "imageurl": "imageUrl",
+    "image_url": "imageUrl",
+    "image": "imageUrl",
+    "categoryid": "categoryId",
+    "category_id": "categoryId",
+    "categoryname": "categoryName",
+    "category_name": "categoryName",
+    "categoryslug": "categorySlug",
+    "category_slug": "categorySlug",
+    "status": "status",
+    "isactive": "isActive",
+    "is_active": "isActive",
+    "active": "isActive",
+    "shippingweightgrams": "shippingWeightGrams",
+    "shipping_weight_grams": "shippingWeightGrams",
+    "weight": "shippingWeightGrams",
+    "shippingmode": "shippingMode",
+    "shipping_mode": "shippingMode",
+    "flatrateamount": "flatRateAmount",
+    "flat_rate_amount": "flatRateAmount",
+    "freeshipping": "freeShipping",
+    "free_shipping": "freeShipping",
+  };
+
+  return columnMap[normalized] || col;
+}
+
+/**
+ * Parse CSV content
+ */
+export function parseCSV(content: string): { headers: string[]; rows: Record<string, string>[] } {
+  const lines = content.split(/\r?\n/).filter(line => line.trim());
+  
+  if (lines.length < 2) {
+    throw new Error("CSV must have at least a header row and one data row");
+  }
+
+  // Parse header row
+  const headerLine = lines[0];
+  const headers = parseCSVRow(headerLine).map(normalizeColumnName);
+
+  // Parse data rows
+  const rows: Record<string, string>[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    const values = parseCSVRow(lines[i]);
+    if (values.every(v => !v.trim())) continue; // Skip empty rows
+
+    const row: Record<string, string> = {};
+    headers.forEach((header, idx) => {
+      row[header] = values[idx] || "";
+    });
+    rows.push(row);
+  }
+
+  return { headers, rows };
+}
+
+/**
+ * Parse a single CSV row handling quotes and escapes
+ */
+function parseCSVRow(line: string): string[] {
+  const result: string[] = [];
+  let current = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    const nextChar = line[i + 1];
+
+    if (char === '"') {
+      if (inQuotes && nextChar === '"') {
+        current += '"';
+        i++; // Skip escaped quote
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (char === "," && !inQuotes) {
+      result.push(current.trim());
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+
+  result.push(current.trim());
+  return result;
+}
+
+/**
+ * Validate headers
+ */
+export function validateHeaders(headers: string[]): ValidationResult {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  // Check for required columns
+  const hasName = headers.includes("name");
+  const hasPriceCents = headers.includes("priceCents");
+  const hasPrice = headers.includes("price");
+
+  if (!hasName) {
+    errors.push("Missing required column: name");
+  }
+
+  if (!hasPriceCents && !hasPrice) {
+    errors.push("Missing required column: priceCents or price");
+  }
+
+  // Check for unknown columns
+  const normalizedHeaders = headers.map(h => h.toLowerCase());
+  const unknownColumns = headers.filter(h => 
+    !VALID_COLUMNS.map(c => c.toLowerCase()).includes(h.toLowerCase())
+  );
+  
+  if (unknownColumns.length > 0) {
+    warnings.push(`Unknown columns will be ignored: ${unknownColumns.join(", ")}`);
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+    warnings,
+  };
+}
+
+/**
+ * Validate a single row
+ */
+export function validateRow(row: Record<string, string>, rowNumber: number): ValidationResult {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  // Validate name
+  if (!row.name || !row.name.trim()) {
+    errors.push("Name is required");
+  } else if (row.name.length > 500) {
+    errors.push("Name must be 500 characters or less");
+  }
+
+  // Validate price
+  const priceCents = row.priceCents ? parseInt(row.priceCents, 10) : null;
+  const price = row.price ? parseFloat(row.price) : null;
+
+  if (priceCents === null && price === null) {
+    errors.push("Price (priceCents or price) is required");
+  } else if (priceCents !== null) {
+    if (isNaN(priceCents) || priceCents < 0) {
+      errors.push("priceCents must be a non-negative integer");
+    }
+  } else if (price !== null) {
+    if (isNaN(price) || price < 0) {
+      errors.push("price must be a non-negative number");
+    }
+  }
+
+  // Validate optional fields
+  if (row.categoryId) {
+    const categoryId = parseInt(row.categoryId, 10);
+    if (isNaN(categoryId) || categoryId < 1) {
+      warnings.push("Invalid categoryId, will be ignored");
+    }
+  }
+
+  if (row.shippingWeightGrams) {
+    const weight = parseInt(row.shippingWeightGrams, 10);
+    if (isNaN(weight) || weight < 0) {
+      warnings.push("Invalid shippingWeightGrams, will be ignored");
+    }
+  }
+
+  if (row.shippingMode) {
+    const validModes = ["LIVE", "FREE", "FLAT", "LOCAL"];
+    if (!validModes.includes(row.shippingMode.toUpperCase())) {
+      warnings.push(`Invalid shippingMode "${row.shippingMode}", will use default`);
+    }
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+    warnings,
+  };
+}
+
+/**
+ * Convert a row to product data
+ */
+async function rowToProductData(
+  row: Record<string, string>,
+  sellerId: number,
+  categoryCache: Map<string, number | null>
+): Promise<{
+  name: string;
+  description: string | null;
+  sku: string | null;
+  externalId: string | null;
+  priceCents: number;
+  imageUrl: string | null;
+  categoryId: number | null;
+  status: string;
+  isActive: boolean;
+  sellerId: number;
+  shippingWeightGrams: number | null;
+  shippingMode: "LIVE" | "FREE" | "FLAT" | "LOCAL" | null;
+  flatRateAmount: number | null;
+  freeShipping: boolean;
+}> {
+  // Calculate price in cents
+  let priceCents: number;
+  if (row.priceCents) {
+    priceCents = parseInt(row.priceCents, 10);
+  } else if (row.price) {
+    priceCents = Math.round(parseFloat(row.price) * 100);
+  } else {
+    priceCents = 0;
+  }
+
+  // Resolve category
+  let categoryId: number | null = null;
+  if (row.categoryId) {
+    categoryId = parseInt(row.categoryId, 10);
+    if (isNaN(categoryId)) categoryId = null;
+    // Check if category is blocked (alcohol compliance)
+    if (categoryId) {
+      const blockedCheck = await prisma.category.findUnique({ where: { id: categoryId }, select: { isBlocked: true } });
+      if (blockedCheck?.isBlocked) {
+        return { productId: null, created: false, updated: false, skipped: true, error: "Category is blocked (alcohol compliance)" };
+      }
+    }
+  } else if (row.categorySlug || row.categoryName) {
+    const cacheKey = row.categorySlug || row.categoryName;
+    if (categoryCache.has(cacheKey)) {
+      categoryId = categoryCache.get(cacheKey) || null;
+    } else {
+      // Look up category
+      const category = await prisma.category.findFirst({
+        where: row.categorySlug
+          ? { slug: row.categorySlug }
+          : { name: { equals: row.categoryName, mode: "insensitive" } },
+        select: { id: true },
+      });
+      categoryId = category?.id || null;
+      categoryCache.set(cacheKey, categoryId);
+    }
+  }
+  
+  // Auto-categorize if no category resolved
+  if (!categoryId && row.name) {
+    const autoResult = await autoCategorizeProduct(row.name, row.description);
+    if (autoResult.categoryId) {
+      categoryId = autoResult.categoryId;
+    } else {
+      // Fallback to Household Essentials
+      const fallback = await prisma.category.findUnique({ where: { slug: "household-essentials" } });
+      categoryId = fallback?.id || null;
+    }
+  }
+
+  // Parse boolean fields
+  const isActive = row.isActive
+    ? ["true", "1", "yes", "active"].includes(row.isActive.toLowerCase())
+    : true;
+
+  const freeShipping = row.freeShipping
+    ? ["true", "1", "yes"].includes(row.freeShipping.toLowerCase())
+    : false;
+
+  // Parse shipping mode
+  let shippingMode: "LIVE" | "FREE" | "FLAT" | "LOCAL" | null = null;
+  if (row.shippingMode) {
+    const mode = row.shippingMode.toUpperCase();
+    if (["LIVE", "FREE", "FLAT", "LOCAL"].includes(mode)) {
+      shippingMode = mode as "LIVE" | "FREE" | "FLAT" | "LOCAL";
+    }
+  }
+
+  return {
+    name: row.name.trim(),
+    description: row.description?.trim() || null,
+    sku: row.sku?.trim() || null,
+    externalId: row.externalId?.trim() || null,
+    priceCents,
+    imageUrl: row.imageUrl?.trim() || null,
+    categoryId,
+    status: row.status?.toLowerCase() || "pending",
+    isActive,
+    sellerId,
+    shippingWeightGrams: row.shippingWeightGrams ? parseInt(row.shippingWeightGrams, 10) : null,
+    shippingMode,
+    flatRateAmount: row.flatRateAmount ? parseFloat(row.flatRateAmount) : null,
+    freeShipping,
+  };
+}
+
+/**
+ * Import products from parsed CSV data
+ */
+export async function importProducts(
+  rows: Record<string, string>[],
+  sellerId: number,
+  options: {
+    skipDuplicates?: boolean;
+    updateExisting?: boolean;
+  } = {}
+): Promise<BulkImportResult> {
+  const { skipDuplicates = true, updateExisting = false } = options;
+  
+  const result: BulkImportResult = {
+    success: true,
+    totalRows: rows.length,
+    imported: 0,
+    failed: 0,
+    skipped: 0,
+    errors: [],
+    warnings: [],
+  };
+
+  const categoryCache = new Map<string, number | null>();
+
+  // Process in batches
+  const BATCH_SIZE = 100;
+  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+    const batch = rows.slice(i, i + BATCH_SIZE);
+    
+    for (let j = 0; j < batch.length; j++) {
+      const rowNumber = i + j + 2; // +2 for 1-based index and header row
+      const row = batch[j];
+
+      try {
+        // Validate row
+        const validation = validateRow(row, rowNumber);
+        if (!validation.valid) {
+          result.errors.push({ row: rowNumber, errors: validation.errors });
+          result.failed++;
+          continue;
+        }
+
+        if (validation.warnings.length > 0) {
+          result.warnings.push({ row: rowNumber, warnings: validation.warnings });
+        }
+
+        // Convert to product data
+        const productData = await rowToProductData(row, sellerId, categoryCache);
+
+        // Check for existing product by SKU or externalId
+        let existingProduct = null;
+        if (productData.sku) {
+          existingProduct = await prisma.product.findUnique({
+            where: { sku: productData.sku },
+            select: { id: true },
+          });
+        }
+        if (!existingProduct && productData.externalId) {
+          existingProduct = await prisma.product.findUnique({
+            where: { externalId: productData.externalId },
+            select: { id: true },
+          });
+        }
+
+        if (existingProduct) {
+          if (updateExisting) {
+            // Update existing product
+            await prisma.product.update({
+              where: { id: existingProduct.id },
+              data: productData,
+            });
+            result.imported++;
+          } else if (skipDuplicates) {
+            result.skipped++;
+            result.warnings.push({
+              row: rowNumber,
+              warnings: [`Skipped: Product with SKU/externalId already exists`],
+            });
+          } else {
+            result.errors.push({
+              row: rowNumber,
+              errors: [`Duplicate: Product with SKU/externalId already exists`],
+            });
+            result.failed++;
+          }
+        } else {
+          // Create new product
+          const newProduct = await prisma.product.create({
+            data: productData,
+          });
+          // Generate slug with ID
+          await prisma.product.update({
+            where: { id: newProduct.id },
+            data: { slug: generateProductSlug(newProduct.name, newProduct.id) },
+          });
+          result.imported++;
+        }
+      } catch (error: any) {
+        result.errors.push({
+          row: rowNumber,
+          errors: [error.message || "Unknown error"],
+        });
+        result.failed++;
+      }
+    }
+  }
+
+  result.success = result.failed === 0;
+  return result;
+}
+
+/**
+ * Generate CSV template
+ */
+export function generateCSVTemplate(): string {
+  const headers = [
+    "name",
+    "description",
+    "sku",
+    "priceCents",
+    "imageUrl",
+    "categorySlug",
+    "status",
+    "isActive",
+    "shippingWeightGrams",
+    "shippingMode",
+    "freeShipping",
+  ];
+
+  const exampleRow = [
+    "Example Product Name",
+    "Product description goes here",
+    "SKU-001",
+    "1999",
+    "https://example.com/image.jpg",
+    "electronics",
+    "active",
+    "true",
+    "500",
+    "LIVE",
+    "false",
+  ];
+
+  return `${headers.join(",")}\n${exampleRow.join(",")}`;
+}
+
+/**
+ * Get supported file formats info
+ */
+export function getSupportedFormats(): { format: string; mimeType: string; extension: string }[] {
+  return [
+    { format: "CSV", mimeType: "text/csv", extension: ".csv" },
+    { format: "CSV (Excel)", mimeType: "application/vnd.ms-excel", extension: ".csv" },
+    { format: "XLSX", mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", extension: ".xlsx" },
+  ];
+}
+

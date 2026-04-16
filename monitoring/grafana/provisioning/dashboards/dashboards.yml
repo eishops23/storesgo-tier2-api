@@ -1,0 +1,16 @@
+# =============================================================================
+# 📊 GRAFANA DASHBOARDS PROVISIONING — STORESGO BACKEND
+# =============================================================================
+apiVersion: 1
+
+providers:
+  - name: 'StoresGo Dashboards'
+    orgId: 1
+    folder: 'StoresGo'
+    folderUid: 'storesgo'
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /etc/grafana/provisioning/dashboards/json
+

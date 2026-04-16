@@ -1,0 +1,75 @@
+# =============================================================================
+# Docker Ignore — Exclude unnecessary files from Docker build context
+# =============================================================================
+
+# Dependencies (rebuilt in container)
+node_modules
+npm-debug.log
+yarn-error.log
+
+# Build outputs (rebuilt in container)
+dist
+
+# Development files
+*.dev.db
+*.sqlite
+prisma/dev.db
+prisma/*.db
+
+# IDE and editor
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# Git
+.git
+.gitignore
+
+# Documentation (not needed in production)
+*.md
+!README.md
+docs/
+
+# Tests
+**/*.test.ts
+**/*.test.js
+**/*.spec.ts
+**/*.spec.js
+src/smoke/
+coverage/
+.nyc_output/
+
+# Environment files (injected at runtime)
+.env
+.env.*
+!.env.example
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Uploads (mounted as volume in production)
+uploads/
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+Jenkinsfile
+
+# Kubernetes configs (not needed in image)
+k8s/
+kubernetes/
+
+# Misc
+*.sql
+*.txt
+show.sql
+count_products.sql
+copy-js-files.js
+

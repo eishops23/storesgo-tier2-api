@@ -1,0 +1,370 @@
+/**
+ * STORESGO ENTERPRISE AI SEARCH
+ * Version: 2.1.0
+ * 
+ * Fixes: Hardcoded category exclusions + tiered scoring
+ * Based on actual Meilisearch category taxonomy audit
+ */
+
+import { MeiliSearch } from "meilisearch";
+import { getFiltersWithCounts } from "./filter.service.js";
+import OpenAI from "openai";
+
+const meili = new MeiliSearch({
+  host: "http://127.0.0.1:7700",
+  apiKey: process.env.MEILI_MASTER_KEY || "ff6c780c6c9cfd9156cd7831e86a49b21cbde1ece9d55dc9b2fcb11ef8b63482",
+});
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const productsIndex = meili.index("products");
+
+// ==================== CACHE =====================
+const cache = new Map<string, { data: any; ts: number }>();
+const CACHE_TTL = 1000 * 60 * 60; // 1 hour (was 24)
+
+function getCache(key: string): any | null {
+  const e = cache.get(key);
+  if (e && Date.now() - e.ts < CACHE_TTL) return e.data;
+  cache.delete(key);
+  return null;
+}
+
+function setCache(key: string, data: any): void {
+  cache.set(key, { data, ts: Date.now() });
+  if (cache.size > 10000) cache.delete(cache.keys().next().value!);
+}
+
+
+// ==================== AI QUERY UNDERSTANDING =====================
+
+interface QueryIntent {
+  searchQuery: string;
+  refinements: string[];
+  targetCategoryPatterns: string[];
+  excludeNamePatterns: string[];
+  isPetSearch: boolean;
+}
+
+async function understandQuery(query: string): Promise<QueryIntent> {
+  const cacheKey = `intent:v3:${query.toLowerCase().trim()}`;
+  const cached = getCache(cacheKey);
+  if (cached) return cached;
+
+  try {
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content: `You are a grocery search AI. Return JSON:
+
+{
+  "searchQuery": "english terms",
+  "refinements": ["product variations"],
+  "targetCategoryPatterns": ["category keywords"],
+  "excludeNamePatterns": ["words to exclude from names"],
+  "isPetSearch": false
+}
+
+RULES:
+1. Translate non-English: leche=milk, pollo=chicken, arroz=rice, queso=cheese, huevos=eggs, pan=bread, carne=meat, pescado=fish, frutas=fruits, verduras=vegetables
+2. refinements = specific product variations users might want
+3. targetCategoryPatterns = broad category terms (will be matched against slugs)
+4. excludeNamePatterns = brand names or words that indicate wrong products
+5. isPetSearch = true ONLY if user is searching for pet products
+
+EXAMPLES:
+"milk" → {"searchQuery":"milk","refinements":["whole milk","2% milk","skim milk","almond milk","oat milk"],"targetCategoryPatterns":["milk","beverages"],"excludeNamePatterns":[],"isPetSearch":false}
+"leche" → {"searchQuery":"milk","refinements":["whole milk","2% milk","skim milk"],"targetCategoryPatterns":["milk","beverages"],"excludeNamePatterns":[],"isPetSearch":false}
+"dog treats" → {"searchQuery":"dog treats","refinements":["dog biscuits","dog chews"],"targetCategoryPatterns":["pet","dog"],"excludeNamePatterns":[],"isPetSearch":true}
+"pollo" → {"searchQuery":"chicken","refinements":["chicken breast","whole chicken","chicken thighs"],"targetCategoryPatterns":["chicken","poultry","meat"],"excludeNamePatterns":[],"isPetSearch":false}
+
+Return ONLY valid JSON.`
+        },
+        { role: "user", content: query }
+      ],
+      temperature: 0.2,
+      max_tokens: 300,
+    });
+
+    const content = response.choices[0]?.message?.content || "{}";
+    const parsed = JSON.parse(content.replace(/```json\n?|\n?```/g, ""));
+
+    const result: QueryIntent = {
+      searchQuery: parsed.searchQuery || query,
+      refinements: parsed.refinements || [],
+      targetCategoryPatterns: parsed.targetCategoryPatterns || [],
+      excludeNamePatterns: parsed.excludeNamePatterns || [],
+      isPetSearch: parsed.isPetSearch || false,
+    };
+
+    setCache(cacheKey, result);
+    return result;
+  } catch (error) {
+    console.error("Query understanding error:", error);
+    return { searchQuery: query, refinements: [], targetCategoryPatterns: [], excludeNamePatterns: [], isPetSearch: false };
+  }
+}
+
+// ==================== SMART FILTER =====================
+
+function smartFilter(hits: any[], intent: QueryIntent): any[] {
+  const validHits: Array<any & { _score: number }> = [];
+  const searchTerms = intent.searchQuery.toLowerCase().split(/\s+/);
+  const primaryTerm = searchTerms[0];
+
+  // First pass: collect category matches
+  const categoryMatches: Array<any & { _score: number }> = [];
+  const nameOnlyMatches: Array<any & { _score: number }> = [];
+
+  for (const hit of hits) {
+    const name = (hit.name || "").toLowerCase();
+    const slug = (hit.categorySlug || "").toLowerCase();
+    const categoryName = (hit.categoryName || "").toLowerCase();
+
+    const termInCategory = slug.includes(primaryTerm) || categoryName.includes(primaryTerm);
+    const termInName = name.includes(primaryTerm);
+
+    // GPT exclusions
+    let excluded = false;
+    for (const pattern of intent.excludeNamePatterns) {
+      if (name.includes(pattern.toLowerCase())) { excluded = true; break; }
+    }
+    if (excluded) continue;
+
+    let score = 0;
+    if (termInCategory) {
+      score = 50;
+      if (name.startsWith(primaryTerm)) score += 25;
+      else if (termInName) score += 10;
+      for (const p of intent.targetCategoryPatterns) {
+        if (slug.includes(p.toLowerCase())) score += 10;
+      }
+      categoryMatches.push({ ...hit, _score: score });
+    } else if (termInName) {
+      score = name.startsWith(primaryTerm) ? 15 : 2;
+      nameOnlyMatches.push({ ...hit, _score: score });
+    }
+  }
+
+  // Prefer category matches; only use name-only if no category matches
+  const results = categoryMatches.length > 0 ? categoryMatches : nameOnlyMatches;
+  results.sort((a, b) => b._score - a._score);
+  return results;
+}
+
+// ==================== SMART SUDGESTIONS =====================
+
+export async function getSmartSuggestions(query: string, limit = 10) {
+  if (!query || query.length < 1) {
+    return { refinements: [], products: [], categories: [], correctedQuery: null };
+  }
+
+  try {
+    const intent = await understandQuery(query);
+
+    // Get refinements
+    const refinementQueries = [intent.searchQuery, ...intent.refinements];
+    const refinements = await Promise.all(
+      refinementQueries.slice(0, 10).map(async (refQuery: string) => {
+        try {
+          const result = await productsIndex.search(refQuery, {
+            limit: 50,
+            attributesToRetrieve: ["imageUrl", "name", "categorySlug"],
+          });
+
+          const filtered = smartFilter(result.hits, intent);
+          const firstHit = filtered[0];
+
+          return {
+            query: refQuery,
+            displayName: refQuery,
+            productCount: filtered.length > 0 ? result.estimatedTotalHits || filtered.length : 0,
+            imageUrl: firstHit?.imageUrl || null,
+          };
+        } catch {
+          return { query: refQuery, displayName: refQuery, productCount: 0, imageUrl: null };
+        }
+      })
+    );
+
+    // Get products
+    const productResults = await productsIndex.search(intent.searchQuery, {
+      limit: 50,
+      attributesToRetrieve: ["id", "name", "imageUrl", "priceCents", "categorySlug"],
+    });
+    const filteredProducts = smartFilter(productResults.hits, intent).slice(0, 4);
+
+    // Get categories from filtered results
+    const categoryMap = new Map<string, string>();
+    smartFilter(productResults.hits, intent).forEach((h: any) => {
+      if (h.categorySlug && h.categoryName) {
+        categoryMap.set(h.categorySlug, h.categoryName);
+      }
+    });
+
+    return {
+      refinements: refinements.filter(r => r.productCount > 0).slice(0, limit),
+      products: filteredProducts.map((h: any) => ({
+        id: h.id, name: h.name, imageUrl: h.imageUrl, priceCents: h.priceCents,
+      })),
+      categories: [...categoryMap.entries()].slice(0, 5).map(([slug, name]) => ({ name, slug })),
+      correctedQuery: intent.searchQuery !== query ? intent.searchQuery : null,
+      totalResults: filteredProducts.length,
+    };
+  } catch (error) {
+    console.error("Suggestions error:", error);
+    return { refinements: [], products: [], categories: [], correctedQuery: null };
+  }
+}
+
+// ==================== DYNAMIC FILTER FROM RESULTS ====================
+function generateDynamicFilters(hits: any[]): any[] {
+  if (!hits.length) return [];
+  const brands = new Map<string, number>();
+  const stores = new Map<string, { id: number; name: string; count: number }>();
+  const categories = new Map<string, { slug: string; name: string; count: number }>();
+  let minPrice = Infinity, maxPrice = 0;
+  for (const hit of hits) {
+    if (hit.brand) brands.set(hit.brand, (brands.get(hit.brand) || 0) + 1);
+    else {
+      const match = (hit.name || "").match(/^([A-Z][a-z]+(?:'s)?(?:\s[A-Z][a-z]+)?)/);
+      if (match) brands.set(match[1], (brands.get(match[1]) || 0) + 1);
+    }
+    if (hit.sellerId && hit.sellerName) {
+      const key = String(hit.sellerId);
+      const e = stores.get(key);
+      if (e) e.count++; else stores.set(key, { id: hit.sellerId, name: hit.sellerName, count: 1 });
+    }
+    if (hit.categorySlug && hit.categoryName) {
+      const e = categories.get(hit.categorySlug);
+      if (e) e.count++; else categories.set(hit.categorySlug, { slug: hit.categorySlug, name: hit.categoryName, count: 1 });
+    }
+    if (hit.priceCents) { minPrice = Math.min(minPrice, hit.priceCents); maxPrice = Math.max(maxPrice, hit.priceCents); }
+  }
+  const filters: any[] = [];
+  if (brands.size > 0) filters.push({ key: "brand", displayName: "Brand", type: "checkbox", options: Array.from(brands.entries()).sort((a,b) => b[1]-a[1]).slice(0,15).map(([v,c]) => ({ value: v, count: c })) });
+  if (categories.size > 1) filters.push({ key: "category", displayName: "Category", type: "checkbox", options: Array.from(categories.values()).sort((a,b) => b.count-a.count).map(c => ({ value: c.slug, label: c.name, count: c.count })) });
+  if (stores.size > 1) filters.push({ key: "store", displayName: "Store", type: "checkbox", options: Array.from(stores.values()).sort((a,b) => b.count-a.count).map(s => ({ value: String(s.id), label: s.name, count: s.count })) });
+  if (minPrice < Infinity) filters.push({ key: "price", displayName: "Price Range", type: "range", options: [{ value: "min", count: Math.floor(minPrice/100) }, { value: "max", count: Math.ceil(maxPrice/100) }] });
+  return filters;
+}
+
+// ==================== MAIN SEARCH =====================
+
+export async function aiSmartSearch(options: {
+  query: string;
+  page?: number;
+  pageSize?: number;
+  filters?: any;
+  categoryId?: number;
+  sessionId?: string;
+}) {
+  const { query, page = 1, pageSize = 24, filters = {}, categoryId } = options;
+
+  if (!query?.trim()) {
+    const result = await productsIndex.search("", { limit: pageSize, offset: (page - 1) * pageSize });
+    return { products: result.hits, total: result.estimatedTotalHits || 0, page, pageSize, filters: [] };
+  }
+
+  const intent = await understandQuery(query);
+
+  // Build filter
+  const filterParts: string[] = [];
+  if (categoryId) filterParts.push(`categoryId = ${categoryId}`);
+  if (filters.priceMin) filterParts.push(`priceCents >= ${Math.round(filters.priceMin * 100)}`);
+  if (filters.priceMax) filterParts.push(`priceCents <= ${Math.round(filters.priceMax * 100)}`);
+
+  let sort: string[] = [];
+  if (filters.sort === "price-asc") sort = ["priceCents:asc"];
+  else if (filters.sort === "price-desc") sort = ["priceCents:desc"];
+  else if (filters.sort === "name-asc") sort = ["name:asc"];
+
+  try {
+    // Get extra results for filtering
+    const result = await productsIndex.search(intent.searchQuery, {
+      filter: filterParts.length > 0 ? filterParts.join(" AND ") : undefined,
+      sort: sort.length > 0 ? sort : undefined,
+      limit: pageSize * 5,
+      offset: 0,
+      attributesToRetrieve: [
+        "id", "name", "description", "priceCents", "currency", "imageUrl",
+        "categoryId", "categoryName", "categorySlug",
+        "sellerId", "sellerName", "brand", "inStock"
+      ],
+    });
+
+    // Smart filter
+    const filteredHits = smartFilter(result.hits, intent);
+
+    // Paginate
+    const start = (page - 1) * pageSize;
+    const paginatedHits = filteredHits.slice(start, start + pageSize);
+
+    return {
+      products: paginatedHits.map((h: any) => ({
+        id: h.id, name: h.name, description: h.description, priceCents: h.priceCents,
+        currency: h.currency, imageUrl: h.imageUrl,
+        category: h.categoryId ? { id: h.categoryId, name: h.categoryName, slug: h.categorySlug } : null,
+        seller: { id: h.sellerId, storeName: h.sellerName },
+      })),
+      total: filteredHits.length,
+      page, pageSize,
+      searchedFor: intent.searchQuery,
+      originalQuery: query,
+      refinements: intent.refinements.slice(0, 6).map(r => ({ query: r, displayName: r })),
+      filters: generateDynamicFilters(filteredHits),
+    };
+  } catch (error) {
+    console.error("Search error:", error);
+    return { products: [], total: 0, page, pageSize, filters: [] };
+  }
+}
+
+// ==================== OTHER EXPORTS ====================
+
+export async function getRelatedSearches(query: string, limit = 6): Promise<string[]> {
+  const intent = await understandQuery(query);
+  return intent.refinements.slice(0, limit);
+}
+
+export async function getSpellingSuggestions(q: string): Promise<string | null> { return null; }
+
+export async function getFilterPresets(categoryId?: number) {
+  return [
+    { id: "organic", label: "Organic", type: "dietary" },
+    { id: "gluten-free", label: "Gluten Free", type: "dietary" },
+    { id: "vegan", label: "Vegan", type: "dietary" },
+    { id: "kosher", label: "Kosher", type: "dietary" },
+  ];
+}
+
+export async function getDynamicFilters() { return []; }
+
+export async function getFrequentlyBoughtTogether(productId: number, limit = 6) {
+  try {
+    const result = await productsIndex.search("", { filter: `id = ${productId}`, limit: 1 });
+    if (!result.hits.length) return [];
+    const p = result.hits[0] as any;
+    const similar = await productsIndex.search("", { filter: `categoryId = ${p.categoryId} AND id != ${productId}`, limit });
+    return similar.hits;
+  } catch { return []; }
+}
+
+const recentlyViewedMap = new Map<string, number[]>();
+
+export async function trackProductView(sessionId: string, productId: number, userId?: number) {
+  const views = recentlyViewedMap.get(sessionId) || [];
+  recentlyViewedMap.set(sessionId, [productId, ...views.filter(id => id !== productId)].slice(0, 20));
+}
+
+export async function getRecentlyViewed(sessionId: string, limit = 10) {
+  const ids = recentlyViewedMap.get(sessionId) || [];
+  if (!ids.length) return [];
+  try {
+    return (await productsIndex.search("", { filter: ids.map(id => `id = ${id}`).join(" OR "), limit })).hits;
+  } catch { return []; }
+}
+
+function parseNaturalLanguage(q: string) { return { searchTerms: q.split(/\s+/), dietary: [] }; }
+export { parseNaturalLanguage };

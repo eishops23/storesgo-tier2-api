@@ -1,0 +1,551 @@
+// ==========================================================
+// STORESGO HOMEPAGE SERVICE — TASK GROUP 3 (Homepage Dynamic System)
+// Provides complete homepage data with dedicated config model
+// ==========================================================
+
+import { prisma } from "../lib/prisma.js";
+import { cacheAside, CACHE_TTL, CACHE_KEYS } from "../lib/enterprise/cache.js";
+import * as cmsService from "./cms.service.js";
+
+// ---------------------------------------------------------
+// Types
+// ---------------------------------------------------------
+
+export interface HomepageFeaturedProduct {
+  id: number;
+  name: string;
+  priceCents: number;
+  imageUrl: string | null;
+  category: { id: number; name: string; slug: string } | null;
+  seller: { id: number; storeName: string; slug: string };
+}
+
+export interface HomepageCategory {
+  id: number;
+  name: string;
+  slug: string;
+  icon: string | null;
+  image: string | null;
+  tagline: string | null;
+  color: string | null;
+  productCount: number;
+}
+
+export interface HomepageSeller {
+  id: number;
+  storeName: string;
+  slug: string;
+  city: string | null;
+  state: string | null;
+  productCount: number;
+}
+
+export interface HomepageStats {
+  totalProducts: number;
+  totalSellers: number;
+  totalCategories: number;
+}
+
+export interface HomepageDeal {
+  id: number;
+  title: string;
+  description: string | null;
+  imageUrl: string | null;
+  discountPct: number | null;
+  startDate: Date;
+  endDate: Date;
+}
+
+export interface HomepageCmsContent {
+  heroSlides: any[];
+  hero: any[];
+  banners: any[];
+  textModules: any[];
+  promotions: any[];
+  allBlocks: any[];
+}
+
+export interface FooterData {
+  links: Record<string, any[]>;
+  content: Record<string, string>;
+}
+
+export interface HomepageFeedData {
+  featuredProducts: HomepageFeaturedProduct[];
+  newArrivals: HomepageFeaturedProduct[];
+  categories: HomepageCategory[];
+  featuredSellers: HomepageSeller[];
+  stats: HomepageStats;
+  deals: HomepageDeal[];
+  cms: HomepageCmsContent;
+  footer: FooterData;
+  recentBlogs: any[];
+}
+
+// ---------------------------------------------------------
+// NEW: Homepage Config Types (Task Group 3)
+// ---------------------------------------------------------
+
+export interface HomepageHero {
+  title: string | null;
+  subtitle: string | null;
+  image: string | null;
+}
+
+export interface HomepageCta {
+  title: string | null;
+  subtitle: string | null;
+  buttonLabel: string | null;
+  buttonUrl: string | null;
+}
+
+export interface HomepageFooter {
+  aboutHtml: string | null;
+  links: any;
+  social: any;
+}
+
+export interface HomepageDataPayload {
+  hero: HomepageHero;
+  featuredCategories: any[];
+  featuredProducts: any[];
+  blogSectionTitle: string | null;
+  cta: HomepageCta | null;
+  recentBlogs: any[];
+  footer: HomepageFooter;
+}
+
+// ---------------------------------------------------------
+// Service Functions
+// ---------------------------------------------------------
+
+/**
+ * Get featured products for homepage hero section
+ * Returns recently created active products with images
+ */
+export async function getFeaturedProducts(limit = 12): Promise<HomepageFeaturedProduct[]> {
+  const products = await prisma.product.findMany({
+    where: {
+      isActive: true,
+      imageUrl: { not: null },
+    },
+    take: limit,
+    orderBy: { priceCents: "desc" },
+    select: {
+      id: true,
+      name: true,
+      priceCents: true,
+      imageUrl: true,
+      category: {
+        select: { id: true, name: true, slug: true },
+      },
+      seller: {
+        select: { id: true, storeName: true, slug: true },
+      },
+    },
+  });
+
+  return products as HomepageFeaturedProduct[];
+}
+
+/**
+ * Get new arrivals (most recent products)
+ */
+export async function getNewArrivals(limit = 8): Promise<HomepageFeaturedProduct[]> {
+  const products = await prisma.product.findMany({
+    where: { isActive: true },
+    take: limit,
+    orderBy: { createdAt: "desc" },
+    select: {
+      id: true,
+      name: true,
+      priceCents: true,
+      imageUrl: true,
+      category: {
+        select: { id: true, name: true, slug: true },
+      },
+      seller: {
+        select: { id: true, storeName: true, slug: true },
+      },
+    },
+  });
+
+  return products as HomepageFeaturedProduct[];
+}
+
+/**
+ * Get categories with product counts for homepage navigation
+ */
+export async function getCategoriesWithCounts(): Promise<HomepageCategory[]> {
+  // Check for featured categories in config
+  let config: any = null; try { config = await prisma.homepageConfig.findFirst(); } catch {}
+  
+  const categoryFilter = (config?.featuredCategoryIds && config.featuredCategoryIds.length > 0)
+    ? { id: { in: config.featuredCategoryIds } }
+    : { parentId: null };
+
+  const parentCategories = await prisma.category.findMany({
+    where: categoryFilter,
+    orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+    select: { id: true, name: true, slug: true, icon: true, image: true, tagline: true, color: true },
+  });
+
+  const allCategories = await prisma.category.findMany({
+    select: { id: true, parentId: true },
+  });
+
+  const results = await Promise.all(
+    parentCategories.map(async (parent) => {
+      const childIds = allCategories.filter((c) => c.parentId === parent.id).map((c) => c.id);
+      const grandchildIds = allCategories.filter((c) => childIds.includes(c.parentId || 0)).map((c) => c.id);
+      const allCategoryIds = [parent.id, ...childIds, ...grandchildIds];
+      
+      // Count from direct categoryId AND from productCategoryAssignment
+      const [directCount, assignmentCount] = await Promise.all([
+        prisma.product.count({
+          where: { categoryId: { in: allCategoryIds }, isActive: true },
+        }),
+        prisma.product.count({ where: { isActive: true, OR: [{ categoryId: null }, { categoryId: { notIn: allCategoryIds } }], categoryAssignments: { some: { categoryId: { in: allCategoryIds } } } } })
+      ]);
+      const productCount = directCount + assignmentCount;
+      
+      return { ...parent, productCount };
+    })
+  );
+
+  // Sort by config order if using featured categories
+  if (config?.featuredCategoryIds && config.featuredCategoryIds.length > 0) {
+    const orderMap = new Map(config.featuredCategoryIds.map((id, idx) => [id, idx]));
+    results.sort((a, b) => (Number(orderMap.get(a.id) ?? 999)) - (Number(orderMap.get(b.id) ?? 999)));
+  }
+
+  return results;
+}
+
+/**
+ * Get featured sellers (approved with most products)
+ */
+export async function getFeaturedSellers(limit = 6): Promise<HomepageSeller[]> {
+  const sellers = await prisma.seller.findMany({
+    where: { isApproved: true },
+    take: limit,
+    orderBy: {
+      products: { _count: "desc" },
+    },
+    select: {
+      id: true,
+      storeName: true,
+      slug: true,
+      city: true,
+      state: true,
+      _count: {
+        select: { products: true },
+      },
+    },
+  });
+
+  return sellers.map((s) => ({
+    id: s.id,
+    storeName: s.storeName,
+    slug: s.slug,
+    city: s.city,
+    state: s.state,
+    productCount: s._count.products,
+  }));
+}
+
+/**
+ * Get platform statistics
+ */
+export async function getHomepageStats(): Promise<HomepageStats> {
+  const [totalProducts, totalSellers, totalCategories] = await Promise.all([
+    prisma.product.count({ where: { isActive: true } }),
+    prisma.seller.count({ where: { isApproved: true } }),
+    prisma.category.count(),
+  ]);
+
+  return { totalProducts, totalSellers, totalCategories };
+}
+
+/**
+ * Get active seasonal deals
+ */
+export async function getActiveDeals(): Promise<HomepageDeal[]> {
+  const now = new Date();
+
+  const deals = await prisma.seasonalDeal.findMany({
+    where: {
+      active: true,
+      startDate: { lte: now },
+      endDate: { gte: now },
+    },
+    orderBy: { endDate: "asc" },
+    select: {
+      id: true,
+      title: true,
+      description: true,
+      imageUrl: true,
+      discountPct: true,
+      startDate: true,
+      endDate: true,
+    },
+  });
+
+  return deals;
+}
+
+/**
+ * Get recent blog posts for homepage
+ */
+export async function getRecentBlogs(limit = 4): Promise<any[]> {
+  const posts = await prisma.blogPost.findMany({
+    where: { published: true },
+    take: limit,
+    orderBy: { publishedAt: "desc" },
+    select: {
+      id: true,
+      title: true,
+      slug: true,
+      excerpt: true,
+      featuredImage: true,
+      category: true,
+      publishedAt: true,
+    },
+  });
+
+  return posts;
+}
+
+/**
+ * Get complete homepage feed data (all sections + CMS + Footer)
+ */
+export async function getHomepageFeed(): Promise<HomepageFeedData> {
+  const [
+    featuredProducts,
+    newArrivals,
+    categories,
+    featuredSellers,
+    stats,
+    deals,
+    cms,
+    footer,
+    recentBlogs,
+  ] = await Promise.all([
+    getFeaturedProducts(12),
+    getNewArrivals(8),
+    getCategoriesWithCounts(),
+    getFeaturedSellers(6),
+    getHomepageStats(),
+    getActiveDeals(),
+    cmsService.getHomepageCmsContent(),
+    cmsService.getFooterData(),
+    getRecentBlogs(4),
+  ]);
+
+  return {
+    featuredProducts,
+    newArrivals,
+    categories,
+    featuredSellers,
+    stats,
+    deals,
+    cms,
+    footer,
+    recentBlogs,
+  };
+}
+
+// ---------------------------------------------------------
+// Admin Functions — Homepage Config (Task Group 3)
+// Uses dedicated HomepageConfig model
+// ---------------------------------------------------------
+
+export interface HomepageConfigUpdate {
+  heroTitle?: string | null;
+  heroSubtitle?: string | null;
+  heroImageUrl?: string | null;
+  featuredCategoryIds?: number[];
+  featuredProductIds?: number[];
+  blogSectionTitle?: string | null;
+  ctaTitle?: string | null;
+  ctaSubtitle?: string | null;
+  ctaButtonLabel?: string | null;
+  ctaButtonUrl?: string | null;
+  footerAboutHtml?: string | null;
+  footerLinksJson?: any;
+  footerSocialJson?: any;
+}
+
+/**
+ * Ensure homepage config row exists (singleton pattern with id=1)
+ */
+async function ensureHomepageConfig() {
+  const existing = await prisma.homepageConfig.findUnique({
+    where: { id: 1 },
+  });
+  
+  if (!existing) {
+    return prisma.homepageConfig.create({
+      data: {
+        id: 1,
+        heroTitle: "Welcome to StoresGo",
+        heroSubtitle: "Your marketplace for quality products",
+        blogSectionTitle: "Latest from Our Blog",
+      },
+    });
+  }
+  
+  return existing;
+}
+
+/**
+ * Update homepage configuration
+ * Uses the dedicated HomepageConfig model
+ */
+export async function updateHomepageConfig(config: HomepageConfigUpdate): Promise<any> {
+  // Ensure config exists
+  await ensureHomepageConfig();
+  
+  // Build update data - only include fields that are provided
+  const updateData: any = {};
+  
+  if (config.heroTitle !== undefined) updateData.heroTitle = config.heroTitle;
+  if (config.heroSubtitle !== undefined) updateData.heroSubtitle = config.heroSubtitle;
+  if (config.heroImageUrl !== undefined) updateData.heroImageUrl = config.heroImageUrl;
+  if (config.featuredCategoryIds !== undefined) updateData.featuredCategoryIds = config.featuredCategoryIds;
+  if (config.featuredProductIds !== undefined) updateData.featuredProductIds = config.featuredProductIds;
+  if (config.blogSectionTitle !== undefined) updateData.blogSectionTitle = config.blogSectionTitle;
+  if (config.ctaTitle !== undefined) updateData.ctaTitle = config.ctaTitle;
+  if (config.ctaSubtitle !== undefined) updateData.ctaSubtitle = config.ctaSubtitle;
+  if (config.ctaButtonLabel !== undefined) updateData.ctaButtonLabel = config.ctaButtonLabel;
+  if (config.ctaButtonUrl !== undefined) updateData.ctaButtonUrl = config.ctaButtonUrl;
+  if (config.footerAboutHtml !== undefined) updateData.footerAboutHtml = config.footerAboutHtml;
+  if (config.footerLinksJson !== undefined) updateData.footerLinksJson = config.footerLinksJson;
+  if (config.footerSocialJson !== undefined) updateData.footerSocialJson = config.footerSocialJson;
+  
+  return prisma.homepageConfig.update({
+    where: { id: 1 },
+    data: updateData,
+  });
+}
+
+/**
+ * Get current homepage configuration (raw from DB)
+ * Used by admin panel to see current settings
+ */
+export async function getHomepageConfig(): Promise<any> {
+  const config = await ensureHomepageConfig();
+  
+  return {
+    heroTitle: config.heroTitle,
+    heroSubtitle: config.heroSubtitle,
+    heroImageUrl: config.heroImageUrl,
+    featuredCategoryIds: config.featuredCategoryIds || [],
+    featuredProductIds: config.featuredProductIds || [],
+    blogSectionTitle: config.blogSectionTitle,
+    ctaTitle: config.ctaTitle,
+    ctaSubtitle: config.ctaSubtitle,
+    ctaButtonLabel: config.ctaButtonLabel,
+    ctaButtonUrl: config.ctaButtonUrl,
+    footerAboutHtml: config.footerAboutHtml,
+    footerLinksJson: config.footerLinksJson,
+    footerSocialJson: config.footerSocialJson,
+    updatedAt: config.updatedAt,
+  };
+}
+
+/**
+ * Get homepage data for frontend consumption
+ * Returns the structured payload with resolved categories and products
+ */
+export async function getHomepageDataPayload(): Promise<HomepageDataPayload> {
+  // Get the config
+  const config = await ensureHomepageConfig();
+  
+  // Resolve featured categories with RECURSIVE counts
+  let featuredCategories: any[] = [];
+  const allCategoriesWithCounts = await getCategoriesWithCounts();
+  if (config.featuredCategoryIds && config.featuredCategoryIds.length > 0) {
+    const idSet = new Set(config.featuredCategoryIds);
+    featuredCategories = allCategoriesWithCounts.filter((c) => idSet.has(c.id));
+    const orderMap = new Map(config.featuredCategoryIds.map((id, idx) => [id, idx]));
+    featuredCategories.sort((a, b) => (orderMap.get(a.id) ?? 999) - (orderMap.get(b.id) ?? 999));
+  } else {
+    featuredCategories = allCategoriesWithCounts;
+  }
+  
+  // Resolve featured products
+  let featuredProducts: any[] = [];
+  if (config.featuredProductIds && config.featuredProductIds.length > 0) {
+    featuredProducts = await prisma.product.findMany({
+      where: {
+        id: { in: config.featuredProductIds },
+        isActive: true,
+      },
+      select: {
+        id: true,
+        name: true,
+        priceCents: true,
+        imageUrl: true,
+        category: {
+          select: { id: true, name: true, slug: true },
+        },
+        seller: {
+          select: { id: true, storeName: true, slug: true },
+        },
+      },
+    });
+    
+    // Maintain order from config
+    const orderMap = new Map(config.featuredProductIds.map((id, idx) => [id, idx]));
+    featuredProducts.sort((a, b) => (orderMap.get(a.id) ?? 999) - (orderMap.get(b.id) ?? 999));
+  } else {
+    // FALLBACK: Use recent products with images
+    featuredProducts = await getFeaturedProducts(12);
+  }
+  
+  // Get recent published blog posts
+  const recentBlogs = await prisma.blogPost.findMany({
+    where: { published: true },
+    take: 6,
+    orderBy: { publishedAt: "desc" },
+    select: {
+      id: true,
+      title: true,
+      slug: true,
+      excerpt: true,
+      featuredImage: true,
+      category: true,
+      publishedAt: true,
+    },
+  });
+  
+  // Build CTA object (only if at least one CTA field is set)
+  const hasCta = config.ctaTitle || config.ctaSubtitle || config.ctaButtonLabel || config.ctaButtonUrl;
+  const cta: HomepageCta | null = hasCta
+    ? {
+        title: config.ctaTitle,
+        subtitle: config.ctaSubtitle,
+        buttonLabel: config.ctaButtonLabel,
+        buttonUrl: config.ctaButtonUrl,
+      }
+    : null;
+  
+  return {
+    hero: {
+      title: config.heroTitle,
+      subtitle: config.heroSubtitle,
+      image: config.heroImageUrl,
+    },
+    featuredCategories,
+    featuredProducts,
+    blogSectionTitle: config.blogSectionTitle,
+    cta,
+    recentBlogs,
+    footer: {
+      aboutHtml: config.footerAboutHtml,
+      links: config.footerLinksJson,
+      social: config.footerSocialJson,
+    },
+  };
+}

@@ -1,0 +1,375 @@
+/**
+ * StoresGo Stripe Payment Routes
+ * Replaces: src/routes/square.ts
+ * 
+ * Uses Stripe Payment Intents with auth-and-capture flow:
+ *   1. create-payment  → creates PaymentIntent with capture_method: "manual" (authorizes)
+ *   2. capture-payment → captures authorized PaymentIntent
+ *   3. void-payment    → cancels authorized PaymentIntent
+ */
+
+import { FastifyPluginAsync } from "fastify";
+import Stripe from "stripe";
+import { prisma } from "../lib/prisma.js";
+
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || "";
+const STRIPE_PUBLISHABLE_KEY = process.env.STRIPE_PUBLISHABLE_KEY || "";
+
+const stripe = new Stripe(STRIPE_SECRET_KEY, {
+  apiVersion: "2024-12-18.acacia" as any,
+});
+
+// Helper: Get or create Stripe customer for user
+async function getOrCreateStripeCustomer(
+  userId: string,
+  email: string,
+  firstName?: string,
+  lastName?: string
+): Promise<string | null> {
+  // Check if user already has a Stripe customer ID
+  const profile = await prisma.buyerProfile.findUnique({
+    where: { userId },
+  });
+
+  if (profile?.stripeCustomerId) {
+    return profile.stripeCustomerId;
+  }
+
+  try {
+    const customer = await stripe.customers.create({
+      email,
+      name: [firstName, lastName].filter(Boolean).join(" ") || undefined,
+      metadata: { userId },
+    });
+
+    // Save Stripe customer ID to profile
+    await prisma.buyerProfile.upsert({
+      where: { userId },
+      update: { stripeCustomerId: customer.id },
+      create: {
+        userId,
+        stripeCustomerId: customer.id,
+      },
+    });
+
+    return customer.id;
+  } catch (error: any) {
+    console.error("Stripe customer creation error:", error.message);
+    return null;
+  }
+}
+
+const stripeRoutes: FastifyPluginAsync = async (app) => {
+  // GET /stripe/config - Return publishable key for frontend
+  app.get("/config", async () => {
+    return {
+      publishableKey: STRIPE_PUBLISHABLE_KEY,
+    };
+  });
+
+  // POST /stripe/create-payment-intent - Create PaymentIntent (authorize only)
+  app.post("/create-payment", async (request) => {
+    const { amount, orderId, email, saveCard, paymentMethodId, customerId, billingAddress } =
+      request.body as any;
+
+    if (!amount) return { success: false, error: "Amount required" };
+
+    if (!STRIPE_SECRET_KEY) {
+      return { success: false, error: "Stripe not configured" };
+    }
+
+    try {
+      // Pre-create order record if orderId provided
+      if (orderId && orderId.startsWith("pending_")) {
+        try {
+          await prisma.order.updateMany({
+            where: { id: parseInt(orderId.replace("pending_", "")) || 0 },
+            data: { paymentStatus: "AUTHORIZING" },
+          });
+        } catch {}
+      }
+
+      // Build PaymentIntent params
+      const intentParams: Stripe.PaymentIntentCreateParams = {
+        amount: Math.round(amount * 100), // Stripe expects cents
+        currency: "usd",
+        capture_method: "manual", // Auth-and-capture: authorize now, capture later
+        receipt_email: email || undefined,
+        metadata: {
+          orderId: orderId || "",
+          platform: "storesgo",
+        },
+      };
+
+      // If user wants to save card or use a saved payment method
+      const user = (request as any).user;
+
+      if (paymentMethodId && customerId) {
+        // Using a saved payment method
+        intentParams.payment_method = paymentMethodId;
+        intentParams.customer = customerId;
+        intentParams.confirm = true;
+        intentParams.automatic_payment_methods = {
+          enabled: true,
+          allow_redirects: "never",
+        };
+      } else if (saveCard && user) {
+        // New card + save it: attach to customer
+        const fullUser = await prisma.user.findUnique({
+          where: { id: user.id },
+          include: { buyerProfile: true },
+        });
+
+        if (fullUser) {
+          console.log("[Stripe] Save card requested for user " + user.id);
+
+          const stripeCustomerId = await getOrCreateStripeCustomer(
+            user.id,
+            fullUser.email,
+            fullUser.buyerProfile?.firstName || undefined,
+            fullUser.buyerProfile?.lastName || undefined
+          );
+
+          if (stripeCustomerId) {
+            intentParams.customer = stripeCustomerId;
+            intentParams.setup_future_usage = "off_session"; // This saves the payment method
+            console.log("[Stripe] Customer attached: " + stripeCustomerId);
+          }
+        }
+      }
+
+      // If not using a saved method, let frontend confirm with Stripe.js
+      if (!intentParams.confirm) {
+        intentParams.automatic_payment_methods = {
+          enabled: true,
+        };
+      }
+
+      // Force 3D Secure on all card payments to shift fraud liability to card issuer
+      intentParams.payment_method_options = {
+        ...intentParams.payment_method_options,
+        card: {
+          request_three_d_secure: "any",
+        },
+      };
+
+      const paymentIntent = await stripe.paymentIntents.create(intentParams);
+
+      // If already confirmed (saved card), update order
+      if (
+        paymentIntent.status === "requires_capture" ||
+        paymentIntent.status === "succeeded"
+      ) {
+        // Payment authorized successfully
+        if (orderId) {
+          try {
+            await prisma.order.updateMany({
+              where: { id: parseInt(orderId.replace("pending_", "")) || 0 },
+              data: {
+                stripePaymentId: paymentIntent.id,
+                paymentStatus: "AUTHORIZED",
+              },
+            });
+          } catch (e) {
+            console.log("[Stripe] Could not update order:", e);
+          }
+        }
+
+        const pm = paymentIntent.payment_method
+          ? await stripe.paymentMethods.retrieve(paymentIntent.payment_method as string)
+          : null;
+
+        return {
+          success: true,
+          transactionId: paymentIntent.id,
+          confirmed: true,
+          amount: paymentIntent.amount / 100,
+          status: paymentIntent.status,
+          paymentStatus: "AUTHORIZED",
+          card: pm?.card
+            ? {
+                brand: pm.card.brand,
+                last4: pm.card.last4,
+                expMonth: pm.card.exp_month,
+                expYear: pm.card.exp_year,
+              }
+            : null,
+        };
+      }
+
+      // Return client secret for frontend to confirm
+      return {
+        success: true,
+        clientSecret: paymentIntent.client_secret,
+        paymentIntentId: paymentIntent.id,
+        confirmed: false,
+        amount: paymentIntent.amount / 100,
+      };
+    } catch (error: any) {
+      console.error("[Stripe] Payment exception:", error.message);
+      return { success: false, error: error.message || "Payment failed" };
+    }
+  });
+
+  // POST /stripe/confirm-payment - Called by frontend after Stripe.js confirms
+  app.post("/confirm-payment", async (request) => {
+    const { paymentIntentId, orderId } = request.body as any;
+
+    if (!paymentIntentId) return { success: false, error: "Payment Intent ID required" };
+
+    try {
+      const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+
+      if (
+        paymentIntent.status === "requires_capture" ||
+        paymentIntent.status === "succeeded"
+      ) {
+        // Update order with payment info
+        if (orderId) {
+          try {
+            await prisma.order.updateMany({
+              where: { id: parseInt(orderId.toString().replace("pending_", "")) || 0 },
+              data: {
+                stripePaymentId: paymentIntent.id,
+                paymentStatus: "AUTHORIZED",
+              },
+            });
+          } catch (e) {
+            console.log("[Stripe] Could not update order:", e);
+          }
+        }
+
+        const pm = paymentIntent.payment_method
+          ? await stripe.paymentMethods.retrieve(paymentIntent.payment_method as string)
+          : null;
+
+        return {
+          success: true,
+          transactionId: paymentIntent.id,
+          amount: paymentIntent.amount / 100,
+          status: paymentIntent.status,
+          paymentStatus: "AUTHORIZED",
+          card: pm?.card
+            ? {
+                brand: pm.card.brand,
+                last4: pm.card.last4,
+                expMonth: pm.card.exp_month,
+                expYear: pm.card.exp_year,
+              }
+            : null,
+        };
+      }
+
+      return {
+        success: false,
+        error: `Payment not authorized. Status: ${paymentIntent.status}`,
+      };
+    } catch (error: any) {
+      console.error("[Stripe] Confirm error:", error.message);
+      return { success: false, error: error.message || "Confirmation failed" };
+    }
+  });
+
+  // POST /stripe/capture-payment - Capture an authorized payment
+  app.post("/capture-payment", async (request) => {
+    const { paymentId, orderId } = request.body as any;
+    let pid = paymentId;
+
+    if (!pid && orderId) {
+      const order = await prisma.order.findUnique({ where: { id: orderId } });
+      pid = order?.stripePaymentId;
+    }
+
+    if (!pid) return { success: false, error: "Payment ID required" };
+
+    if (!STRIPE_SECRET_KEY) {
+      return { success: false, error: "Stripe not configured" };
+    }
+
+    try {
+      const paymentIntent = await stripe.paymentIntents.capture(pid);
+
+      if (paymentIntent.status === "succeeded") {
+        if (orderId) {
+          try {
+            await prisma.order.updateMany({
+              where: { id: orderId },
+              data: { paymentStatus: "CAPTURED" },
+            });
+          } catch (e) {
+            console.log("[Stripe] Could not update order:", e);
+          }
+        }
+
+        return {
+          success: true,
+          transactionId: paymentIntent.id,
+          status: "CAPTURED",
+          amount: paymentIntent.amount / 100,
+          message: "Payment captured. Customer has been charged.",
+        };
+      }
+
+      return { success: false, error: `Capture failed. Status: ${paymentIntent.status}` };
+    } catch (e: any) {
+      console.error("[Stripe] Capture error:", e.message);
+      return { success: false, error: e.message || "Capture failed" };
+    }
+  });
+
+  // POST /stripe/void-payment - Cancel/void an authorized payment
+  app.post("/void-payment", async (request) => {
+    const { paymentId, orderId } = request.body as any;
+    let pid = paymentId;
+
+    if (!pid && orderId) {
+      const order = await prisma.order.findUnique({ where: { id: orderId } });
+      pid = order?.stripePaymentId;
+    }
+
+    if (!pid) return { success: false, error: "Payment ID required" };
+
+    if (!STRIPE_SECRET_KEY) {
+      return { success: false, error: "Stripe not configured" };
+    }
+
+    try {
+      const paymentIntent = await stripe.paymentIntents.cancel(pid);
+
+      if (paymentIntent.status === "canceled") {
+        if (orderId) {
+          try {
+            await prisma.order.updateMany({
+              where: { id: orderId },
+              data: { paymentStatus: "VOIDED", status: "cancelled" },
+            });
+          } catch (e) {
+            console.log("[Stripe] Could not update order:", e);
+          }
+        }
+
+        return {
+          success: true,
+          transactionId: paymentIntent.id,
+          status: "VOIDED",
+          message: "Payment voided. Customer not charged.",
+        };
+      }
+
+      return { success: false, error: `Void failed. Status: ${paymentIntent.status}` };
+    } catch (e: any) {
+      console.error("[Stripe] Void error:", e.message);
+      return { success: false, error: e.message || "Void failed" };
+    }
+  });
+
+  // GET /stripe/health - Health check
+  app.get("/health", async () => {
+    return {
+      configured: !!STRIPE_SECRET_KEY,
+      provider: "stripe",
+    };
+  });
+};
+
+export default stripeRoutes;

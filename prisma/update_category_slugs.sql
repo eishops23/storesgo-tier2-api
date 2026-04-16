@@ -1,0 +1,12 @@
+UPDATE categories SET slug='caribbean-foods' WHERE id=1;
+UPDATE categories SET slug='latin-foods' WHERE id=2;
+UPDATE categories SET slug='asian-foods' WHERE id=3;
+UPDATE categories SET slug='fragrances' WHERE id=4;
+UPDATE categories SET slug='snacks' WHERE id=5;
+UPDATE categories SET slug='beverages' WHERE id=6;
+UPDATE categories SET slug='baking-cooking' WHERE id=7;
+UPDATE categories SET slug='household-essentials' WHERE id=8;
+UPDATE categories SET slug='personal-care' WHERE id=49;
+UPDATE categories SET slug='health-wellness' WHERE id=50;
+UPDATE categories SET slug='baby-products' WHERE id=51;
+UPDATE categories SET slug='pet-supplies' WHERE id=52;

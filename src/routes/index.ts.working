@@ -1,0 +1,121 @@
+// ==========================================================
+import imageProxyRoutes from "./imageProxy.js";
+import filterRoutes from "./filters.js";
+// STORESGO ROUTE REGISTRY — PHASE 6 + NOTIFICATIONS + BLOG
+// ==========================================================
+
+import { FastifyInstance } from "fastify";
+
+// ⭐ Homepage
+import homepageRoutes from "./homepage.js";
+
+// ⭐ Core route modules
+import categoryRoutes from "./categories/index.js";
+import productRoutes from "./products.js";
+import sellerRoutes from "./sellers/index.js";
+import reviewRoutes from "./reviews/index.js";
+
+// ⭐ SEO Content (blog/guides/deals)
+import seoRoutes from "./seo/index.js";
+
+// 📝 Blog (AI-generated posts - Phase 16)
+import blogRoutes from "./blog/index.js";
+
+// 📝 CMS (homepage blocks, footer content)
+import cmsRoutes from "./cms/index.js";
+
+// 🔍 Search (Phase 18)
+import searchRoutes from "./search/index.js";
+import aiSearchRoutes from "./aiSearch.js";
+
+// 🗺️ Sitemap (Phase 16)
+import sitemapRoutes from "./sitemap/index.js";
+import aiRoutes from "./ai/index.js";
+import recommendationsRoutes from "./recommendations.js";
+
+// ⭐ Auth
+import buyerAuthRoutes from "./auth/buyer.js";
+import sellerAuthRoutes from "./auth/seller.js";
+import passwordResetRoutes from "./auth/passwordReset.js";
+
+// ⭐ Admin
+import adminRoutes from "./admin/index.js";
+
+// 📤 Seller Bulk Upload
+import sellerBulkUploadRoutes from "./seller/bulkUpload.js";
+import sellerProductsRoutes from "./seller/products.js";
+
+// 🔔 Notifications
+import notificationRoutes from "./notifications/index.js";
+
+// 🛒 Orders
+import orderRoutes from "./orders/index.js";
+
+// 📤 File Uploads
+import uploadRoutes from "./uploads/index.js";
+
+export default async function routes(app: FastifyInstance, opts: any) {
+ 
+  // Homepage
+  await app.register(homepageRoutes, { prefix: "/homepage" });
+
+  // Root
+  app.get("/", async () => ({
+    ok: true,
+    message: "StoresGo API Root",
+  }));
+
+  // Core
+  await app.register(categoryRoutes, { prefix: "/categories" });
+  await app.register(productRoutes, { prefix: "/products" });
+  await app.register(sellerRoutes, { prefix: "/sellers" });
+  await app.register(reviewRoutes, { prefix: "/reviews" });
+
+  // SEO Content
+  await app.register(seoRoutes, { prefix: "/seo" });
+
+  // Blog (AI-generated posts)
+  await app.register(blogRoutes, { prefix: "/blog" });
+
+  // CMS (homepage blocks, footer)
+  await app.register(cmsRoutes, { prefix: "/cms" });
+
+  // Search (Phase 18)
+  await app.register(searchRoutes, { prefix: "/search-products" });
+  await app.register(aiSearchRoutes, { prefix: "/ai-search" });
+
+  // Auth
+  await app.register(buyerAuthRoutes, { prefix: "/auth" });
+  await app.register(sellerAuthRoutes, { prefix: "/auth" });
+  await app.register(passwordResetRoutes, { prefix: "/auth" });
+
+  // Admin — prefix "/admin" combines with server.ts "/api" to create "/api/admin"
+  await app.register(adminRoutes, { prefix: "/admin" });
+
+  // Seller Products CRUD — /api/seller/products
+  await app.register(sellerProductsRoutes, { prefix: "/seller/products" });
+
+  // Seller Bulk Upload — /api/seller/products/bulk
+  await app.register(sellerBulkUploadRoutes, { prefix: "/seller/products/bulk" });
+
+  // Notifications — /api/notifications
+  await app.register(notificationRoutes, { prefix: "/notifications" });
+
+  // Orders — /api/orders
+  await app.register(orderRoutes, { prefix: "/orders" });
+
+  // Uploads — /api/uploads
+  await app.register(uploadRoutes, { prefix: "/uploads" });
+
+  // Sitemap — /api/sitemap (also accessible from root via server.ts)
+  // AI Routes
+  await app.register(aiRoutes, { prefix: "/ai" });
+  await app.register(recommendationsRoutes, { prefix: "/recommendations" });
+  await app.register(sitemapRoutes, { prefix: "/sitemap" });
+
+  // Image Proxy - /api/images
+  await app.register(imageProxyRoutes, { prefix: "/images" });
+
+  // Filters — /api/filters
+  await app.register(filterRoutes, { prefix: "/filters" });
+}

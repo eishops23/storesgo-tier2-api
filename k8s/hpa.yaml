@@ -1,0 +1,76 @@
+# =============================================================================
+# 📈 HORIZONTAL POD AUTOSCALER — STORESGO BACKEND
+# Automatically scales pods based on CPU/memory utilization
+# =============================================================================
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: storesgo-backend-hpa
+  namespace: storesgo-prod
+  labels:
+    app.kubernetes.io/name: storesgo-backend
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: storesgo-backend
+  
+  minReplicas: 3
+  maxReplicas: 10
+  
+  metrics:
+    # Scale based on CPU utilization
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    
+    # Scale based on memory utilization
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  
+  behavior:
+    # Scale up quickly
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+      selectPolicy: Max
+    
+    # Scale down slowly to avoid flapping
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+      selectPolicy: Min
+---
+# =============================================================================
+# 📊 POD DISRUPTION BUDGET — STORESGO BACKEND
+# Ensures minimum availability during voluntary disruptions
+# =============================================================================
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: storesgo-backend-pdb
+  namespace: storesgo-prod
+  labels:
+    app.kubernetes.io/name: storesgo-backend
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: storesgo-backend
+

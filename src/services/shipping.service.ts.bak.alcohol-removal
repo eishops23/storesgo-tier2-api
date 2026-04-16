@@ -1,0 +1,423 @@
+// STORESGO SHIPPING SERVICE - FULLY DYNAMIC CARRIER RATES
+import { prisma } from "../plugins/prisma.js";
+
+const EASYPOST_API_KEY = process.env.EASYPOST_API_KEY || "";
+
+interface ShippingOption {
+  id: string;
+  carrier: string;
+  service: string;
+  days: string;
+  price: number;
+  deliveryDate?: string;
+  isLocal?: boolean;
+}
+
+// Format ugly EasyPost service names to customer-friendly display
+function formatServiceName(carrier: string, service: string): string {
+  let clean = service
+    .replace(/^USPS/i, '')
+    .replace(/^UPS/i, '')
+    .replace(/^FedEx/i, '')
+    .replace(/^UPSDAP/i, '')
+    .replace(/GreaterThan\d+lb/gi, '')
+    .replace(/LessThan\d+lb/gi, '')
+    .trim();
+  const serviceMap: Record<string, string> = {
+    'groundadvantage': 'Ground Advantage',
+    'ground': 'Ground',
+    'groundsaver': 'Ground Saver',
+    'priority': 'Priority Mail',
+    'priorityexpress': 'Priority Mail Express',
+    'firstclass': 'First Class',
+    'parcelselect': 'Parcel Select',
+    'express': 'Express',
+    '2ndday': '2-Day',
+    '2nddayair': '2-Day Air',
+    '3dayselect': '3-Day Select',
+    'nextdayair': 'Next Day Air',
+    'nextdayairsaver': 'Next Day Air Saver',
+    'homedelivery': 'Home Delivery',
+    'smartpost': 'SmartPost',
+  };
+  const key = clean.toLowerCase().replace(/[^a-z0-9]/g, '');
+  return serviceMap[key] || clean.replace(/([a-z])([A-Z])/g, '$1 $2');
+}
+
+// Format carrier names to customer-friendly display
+function formatCarrierName(carrier: string): string {
+  const carrierMap: Record<string, string> = {
+    'upsdap': 'UPS',
+    'ups': 'UPS',
+    'usps': 'USPS',
+    'fedex': 'FedEx',
+    'dhl': 'DHL',
+  };
+  return carrierMap[carrier.toLowerCase()] || carrier;
+}
+
+// ZIP code to coordinates mapping (expanded for major US regions)
+const ZIP_COORDS: Record<string, [number, number]> = {
+  // Florida
+  "330": [25.79, -80.13], "331": [25.76, -80.19], "332": [26.12, -80.14],
+  "333": [26.01, -80.29], "334": [26.71, -80.05], "335": [27.33, -82.53],
+  "336": [27.95, -82.46], "337": [28.07, -82.71], "338": [27.77, -82.64],
+  "339": [26.14, -81.79], "340": [26.64, -81.87], "341": [26.64, -81.87],
+  "342": [27.49, -82.57], "320": [30.33, -81.66], "321": [29.65, -82.32],
+  "322": [30.44, -84.28], "323": [30.18, -85.66], "324": [30.40, -86.87],
+  "326": [29.19, -81.05], "327": [28.54, -81.38], "328": [28.03, -80.59],
+  // New York
+  "100": [40.71, -74.01], "101": [40.71, -74.01], "102": [40.71, -74.01],
+  "103": [40.58, -74.15], "104": [40.63, -74.03], "110": [40.76, -73.64],
+  "111": [40.76, -73.64], "112": [40.65, -73.95], "113": [40.68, -73.94],
+  "114": [40.61, -73.97], "115": [40.79, -73.97], "116": [40.80, -73.95],
+  "117": [40.85, -73.87], "118": [40.90, -73.86], "119": [41.00, -73.81],
+  // California
+  "900": [34.05, -118.24], "901": [34.05, -118.24], "902": [33.94, -118.40],
+  "906": [33.78, -118.18], "910": [91.18, -118.38], "911": [34.14, -118.26],
+  "912": [34.21, -118.61], "913": [34.17, -118.45], "914": [34.27, -118.39],
+  "917": [34.04, -117.95], "918": [34.10, -117.89],
+  // Texas
+  "750": [32.78, -96.80], "751": [32.78, -96.80], "752": [32.90, -96.72],
+  "760": [32.75, -97.33], "770": [29.76, -95.37], "773": [29.95, -95.35],
+  // Other major cities
+  "606": [41.88, -87.63], "602": [41.87, -87.62], // Chicago
+  "191": [39.95, -75.17], "190": [39.95, -75.17], // Philadelphia
+  "852": [33.45, -112.07], // Phoenix
+  "802": [39.74, -104.99], // Denver
+  "981": [47.61, -122.33], // Seattle
+  "021": [42.36, -71.06], // Boston
+  "303": [33.75, -84.39], // Atlanta
+};
+
+// Get coordinates for a ZIP code
+function getZipCoords(zip: string): [number, number] {
+  const prefix3 = zip.substring(0, 3);
+  if (ZIP_COORDS[prefix3]) return ZIP_COORDS[prefix3];
+  
+  // Fallback: estimate based on first digit (rough US region)
+  const firstDigit = zip.charAt(0);
+  const fallbacks: Record<string, [number, number]> = {
+    "0": [42.36, -71.06],   // Northeast
+    "1": [40.71, -74.01],   // NY/NJ
+    "2": [38.91, -77.04],   // Mid-Atlantic
+    "3": [33.75, -84.39],   // Southeast
+    "4": [41.88, -87.63],   // Midwest
+    "5": [44.98, -93.27],   // Upper Midwest
+    "6": [41.88, -87.63],   // Central
+    "7": [29.76, -95.37],   // South Central
+    "8": [39.74, -104.99],  // Mountain
+    "9": [34.05, -118.24],  // West Coast
+  };
+  return fallbacks[firstDigit] || [39.50, -98.35]; // Geographic center of US
+}
+
+// Get distance between ZIP codes in miles
+function getDistanceFromZip(zip1: string, zip2: string): number {
+  const c1 = getZipCoords(zip1);
+  const c2 = getZipCoords(zip2);
+  const R = 3959; // Earth radius in miles
+  const dLat = (c2[0] - c1[0]) * Math.PI / 180;
+  const dLon = (c2[1] - c1[1]) * Math.PI / 180;
+  const a = Math.sin(dLat/2)**2 + Math.cos(c1[0]*Math.PI/180)*Math.cos(c2[0]*Math.PI/180)*Math.sin(dLon/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+// Get seller's ZIP code from database
+async function getSellerZip(sellerId: number): Promise<string | null> {
+  try {
+    const seller = await prisma.seller.findUnique({
+      where: { id: sellerId },
+      select: { zipCode: true, city: true, state: true }
+    });
+    return seller?.zipCode || null;
+  } catch {
+    return null;
+  }
+}
+
+// Get live rates from EasyPost
+async function getEasyPostRates(fromZip: string, toZip: string, weight: number, fromCity?: string, fromState?: string): Promise<ShippingOption[]> {
+  if (!EASYPOST_API_KEY) return [];
+
+  try {
+    const EasyPost = (await import("@easypost/api")).default;
+    const client = new EasyPost(EASYPOST_API_KEY);
+
+    const shipment = await client.Shipment.create({
+      from_address: { 
+        street1: "100 Main St", 
+        city: fromCity || "Miami", 
+        state: fromState || "FL", 
+        zip: fromZip, 
+        country: "US" 
+      },
+      to_address: { 
+        street1: "123 Customer St", 
+        city: "Customer City", 
+        state: "FL", 
+        zip: toZip, 
+        country: "US" 
+      },
+      parcel: { weight: weight * 16, length: 10, width: 8, height: 4 }
+    });
+
+    return shipment.rates.map((rate: any) => ({
+      id: rate.id,
+      carrier: formatCarrierName(rate.carrier),
+      service: formatServiceName(rate.carrier, rate.service),
+      days: rate.delivery_days ? `${rate.delivery_days} day${rate.delivery_days > 1 ? 's' : ''}` : "2-5 days",
+      price: Math.round(parseFloat(rate.rate) * 100),
+      deliveryDate: rate.delivery_date
+    }));
+  } catch (error: any) {
+    console.error("EasyPost error:", error.message);
+    return [];
+  }
+}
+
+// Generate estimated rates when API unavailable
+function generateEstimatedRates(distance: number, weight: number): ShippingOption[] {
+  return [
+    { id: "usps-ground", carrier: "USPS", service: "Ground Advantage", days: "2-5 days", price: Math.round((5.95 + weight*0.35 + distance*0.002)*100) },
+    { id: "usps-priority", carrier: "USPS", service: "Priority Mail", days: distance > 500 ? "2-3 days" : "1-3 days", price: Math.round((8.95 + weight*0.5 + distance*0.002)*100) },
+    { id: "fedex-ground", carrier: "FedEx", service: "Ground", days: distance > 500 ? "3-5 days" : "1-3 days", price: Math.round((9.50 + weight*0.45 + distance*0.003)*100) },
+    { id: "ups-ground", carrier: "UPS", service: "Ground", days: distance > 500 ? "3-5 days" : "1-3 days", price: Math.round((10.25 + weight*0.48 + distance*0.0035)*100) },
+  ];
+}
+
+// Check cold products
+async function checkColdProducts(productIds: number[]): Promise<{ hasCold: boolean; coldProducts: any[] }> {
+  if (!productIds.length) return { hasCold: false, coldProducts: [] };
+  const validIds = productIds.filter(id => !isNaN(id) && id > 0);
+  if (!validIds.length) return { hasCold: false, coldProducts: [] };
+  
+  // Cold/Refrigerated category IDs
+  const coldCategoryIds = [
+    // Fresh Milk & Dairy Beverages
+    2687, 2688, 2689, 2690, 2691, 2892, 2897, 2898, 2899, 2900, 2901, 2902, 2903, 2904,
+    // Dairy & Eggs base
+    2868, 2895,
+    // Cheese
+    2872, 2873, 2874, 2877, 2878, 2882, 2887, 2888, 2915, 2917, 2918,
+    // Cream, Butter, Creamer
+    2869, 2889, 2890, 2891, 2893, 2894, 2905, 2906, 2907,
+    // Yogurt
+    2908, 2909, 2910, 2911, 2912, 2913, 3400,
+    // Deli
+    2914, 2919, 2921, 2923, 2926, 2928, 2929,
+    // Fresh Meat & Seafood (3138-3172)
+    3138, 3139, 3140, 3141, 3144, 3145, 3146, 3147, 3148, 3149,
+    3150, 3151, 3154, 3155, 3156, 3157, 3158, 3159, 3160, 3161, 3162, 3163, 3164, 3166, 3167, 3168, 3169, 3170, 3171, 3172,
+    // Breakfast Sausage
+    2991,
+    // Frozen categories
+    2591, 2592, 2593, 2981, 2982, 2985, 2988, 2993, 2996, 2997, 3000, 3005,
+    // Frozen Meat & Seafood
+    3008, 3009, 3010, 3011, 3012, 3013, 3014, 3015,
+    // More frozen
+    3016, 3022, 3310, 3311, 3369, 3371, 3398, 3399,
+    // Tofu (refrigerated)
+    2935
+  ];
+  
+  try {
+    const coldProducts = await prisma.$queryRawUnsafe<any[]>(`
+      SELECT DISTINCT p.id, p.name FROM products p
+      WHERE p.id IN (${validIds.join(",")})
+      AND (
+        -- Primary: Category-based detection (most reliable)
+        p.category_id IN (${coldCategoryIds.join(",")})
+        OR
+        -- Fallback: Keyword-based detection
+        (
+          (
+            p.name ILIKE '%frozen%' OR p.name ILIKE '%ice cream%' OR p.name ILIKE '%gelato%'
+            OR p.name ILIKE '%yogurt%' OR p.name ILIKE '%yoghurt%' OR p.name ILIKE '%kefir%'
+            OR p.name ILIKE '%fresh milk%' OR p.name ILIKE '%whole milk%' OR p.name ILIKE '%2% milk%' OR p.name ILIKE '%skim milk%'
+            OR p.name ILIKE '%cottage cheese%' OR p.name ILIKE '%cream cheese%' OR p.name ILIKE '%sour cream%'
+            OR p.name ILIKE '%butter %' OR p.name ILIKE '% butter' OR p.name ILIKE '%margarine%'
+            OR p.name ILIKE '%fresh meat%' OR p.name ILIKE '%raw chicken%' OR p.name ILIKE '%ground beef%'
+            OR p.name ILIKE '%fresh fish%' OR p.name ILIKE '%fresh salmon%' OR p.name ILIKE '%fresh shrimp%'
+            OR p.name ILIKE '%deli meat%' OR p.name ILIKE '%sliced turkey%' OR p.name ILIKE '%sliced ham%'
+            OR p.name ILIKE '%heavy cream%' OR p.name ILIKE '%whipping cream%' OR p.name ILIKE '%half and half%'
+            OR p.name ILIKE '%egg %' OR p.name ILIKE '% eggs' OR p.name ILIKE '%dozen eggs%'
+            OR p.name ILIKE '%tofu%' OR p.name ILIKE '%tempeh%'
+          )
+          -- Exclude shelf-stable items
+          AND NOT (
+            p.name ILIKE '%shelf stable%' OR p.name ILIKE '%shelf-stable%'
+            OR p.name ILIKE '%powdered%' OR p.name ILIKE '%dried%' OR p.name ILIKE '%dry %'
+            OR p.name ILIKE '%canned%' OR p.name ILIKE '%evaporated%' OR p.name ILIKE '%condensed%'
+            OR p.name ILIKE '%egg noodle%' OR p.name ILIKE '%egg roll wrapper%'
+            OR p.name ILIKE '%peanut butter%' OR p.name ILIKE '%almond butter%' OR p.name ILIKE '%sunflower butter%'
+            OR p.name ILIKE '%cocoa butter%' OR p.name ILIKE '%shea butter%'
+          )
+        )
+      )
+    `);
+    return { hasCold: coldProducts.length > 0, coldProducts };
+  } catch (e) { 
+    console.error("Cold check error:", e);
+    return { hasCold: false, coldProducts: [] }; 
+  }
+}
+
+// Main shipping calculation - FULLY DYNAMIC
+export async function calculateShippingOptions(params: {
+  buyerZip: string;
+  sellerIds?: number[];
+  productIds?: number[];
+  totalWeight?: number;
+  sellerId?: number; // Single seller for direct lookup
+}): Promise<{
+  options: ShippingOption[];
+  distance: number;
+  hasCold: boolean;
+  coldRestriction: boolean;
+  coldProducts: any[];
+  localDeliveryAvailable: boolean;
+}> {
+  const { buyerZip, productIds = [], totalWeight = 2, sellerId, sellerIds } = params;
+  
+  // Get seller ZIP dynamically
+  const effectiveSellerId = sellerId || (sellerIds && sellerIds[0]) || 1;
+  const sellerData = await prisma.seller.findUnique({
+    where: { id: effectiveSellerId },
+    select: { zipCode: true, city: true, state: true }
+  });
+  
+  const sellerZip = sellerData?.zipCode || "33101"; // Fallback only if seller has no ZIP
+  const sellerCity = sellerData?.city || "Miami";
+  const sellerState = sellerData?.state || "FL";
+  
+  const distance = Math.round(getDistanceFromZip(sellerZip, buyerZip));
+
+  const { hasCold, coldProducts } = await checkColdProducts(productIds);
+  const coldRestriction = hasCold && distance > 50;
+  
+  // Local delivery ONLY if within 25 miles
+  const localDeliveryAvailable = distance <= 25;
+
+  // Try live rates first
+  let carrierOptions = await getEasyPostRates(sellerZip, buyerZip, totalWeight, sellerCity, sellerState);
+
+  // Fallback to estimates
+  if (carrierOptions.length === 0) {
+    carrierOptions = generateEstimatedRates(distance, totalWeight);
+  }
+
+  // Sort by price, take top 4
+  carrierOptions = carrierOptions.sort((a, b) => a.price - b.price).slice(0, 4);
+
+  // Add local delivery ONLY if seller is within 25 miles of buyer
+  const localOptions: ShippingOption[] = [];
+  if (localDeliveryAvailable) {
+    localOptions.push({ 
+      id: "local-same", 
+      carrier: "Local", 
+      service: "Same Day Delivery", 
+      days: "Today", 
+      price: distance < 10 ? 499 : 699, 
+      isLocal: true 
+    });
+    localOptions.push({ 
+      id: "local-next", 
+      carrier: "Local", 
+      service: "Next Day Delivery", 
+      days: "Tomorrow", 
+      price: distance < 10 ? 299 : 399, 
+      isLocal: true 
+    });
+  }
+
+  let finalOptions = [...localOptions, ...carrierOptions];
+
+  // Restrict slow shipping for cold products
+  if (coldRestriction) {
+    finalOptions = finalOptions.filter(o => o.isLocal || o.days.includes("1") || o.days.includes("2") || o.service.includes("Express"));
+  }
+
+  return { options: finalOptions, distance, hasCold, coldRestriction, coldProducts, localDeliveryAvailable };
+}
+
+export async function getColdProductsInCart(productIds: number[]): Promise<any[]> {
+  const { coldProducts } = await checkColdProducts(productIds);
+  return coldProducts;
+}
+
+// Check for alcohol products requiring age verification
+export async function checkAlcoholProducts(productIds: number[]): Promise<{ hasAlcohol: boolean; alcoholProducts: any[] }> {
+  if (!productIds.length) return { hasAlcohol: false, alcoholProducts: [] };
+  const validIds = productIds.filter(id => !isNaN(id) && id > 0);
+  if (!validIds.length) return { hasAlcohol: false, alcoholProducts: [] };
+  
+  // Alcohol category IDs: Beer, Wine, Spirits, Cocktails (excluding non-alcoholic)
+  const alcoholCategoryIds = [3582, 3586, 3587, 3622, 3623, 3756, 3757, 3758, 3761, 3762, 3763, 3764, 3774];
+  
+  try {
+    const alcoholProducts = await prisma.$queryRawUnsafe<any[]>(`
+      SELECT DISTINCT p.id, p.name FROM products p
+      WHERE p.id IN (${validIds.join(",")})
+      AND (
+        -- Primary: Category-based detection (most reliable)
+        p.category_id IN (${alcoholCategoryIds.join(",")})
+        OR
+        -- Fallback: Keyword-based detection (comprehensive)
+        (
+          (
+            -- Beer & Malt
+            p.name ILIKE '%beer%' OR p.name ILIKE '%lager%' OR p.name ILIKE '%ale %' OR p.name ILIKE '% ale' 
+            OR p.name ILIKE '%stout%' OR p.name ILIKE '%porter%' OR p.name ILIKE '%pilsner%'
+            OR p.name ILIKE '%ipa %' OR p.name ILIKE '% ipa' OR p.name ILIKE '%malt beverage%'
+            OR p.name ILIKE '%hard seltzer%' OR p.name ILIKE '%seltzer%' OR p.name ILIKE '%white claw%'
+            OR p.name ILIKE '%truly%' OR p.name ILIKE '%bud light%' OR p.name ILIKE '%budweiser%'
+            OR p.name ILIKE '%coors%' OR p.name ILIKE '%miller%' OR p.name ILIKE '%corona%'
+            OR p.name ILIKE '%heineken%' OR p.name ILIKE '%modelo%' OR p.name ILIKE '%michelob%'
+            -- Wine
+            OR p.name ILIKE '%wine%' OR p.name ILIKE '%champagne%' OR p.name ILIKE '%prosecco%'
+            OR p.name ILIKE '%merlot%' OR p.name ILIKE '%cabernet%' OR p.name ILIKE '%chardonnay%'
+            OR p.name ILIKE '%sauvignon%' OR p.name ILIKE '%pinot%' OR p.name ILIKE '%riesling%'
+            OR p.name ILIKE '%moscato%' OR p.name ILIKE '%zinfandel%' OR p.name ILIKE '%malbec%'
+            OR p.name ILIKE '%shiraz%' OR p.name ILIKE '%sangria%' OR p.name ILIKE '%rose wine%'
+            OR p.name ILIKE '%sparkling wine%' OR p.name ILIKE '%cava%' OR p.name ILIKE '%brut%'
+            -- Spirits
+            OR p.name ILIKE '%vodka%' OR p.name ILIKE '%whiskey%' OR p.name ILIKE '%whisky%'
+            OR p.name ILIKE '%bourbon%' OR p.name ILIKE '%scotch%' OR p.name ILIKE '%rum%'
+            OR p.name ILIKE '%tequila%' OR p.name ILIKE '%mezcal%' OR p.name ILIKE '%brandy%'
+            OR p.name ILIKE '%cognac%' OR p.name ILIKE '%liquor%' OR p.name ILIKE '%liqueur%'
+            OR p.name ILIKE '% gin %' OR p.name ILIKE 'gin %' OR p.name ILIKE '% gin'
+            OR p.name ILIKE '%hennessy%' OR p.name ILIKE '%bacardi%' OR p.name ILIKE '%smirnoff%'
+            OR p.name ILIKE '%absolut%' OR p.name ILIKE '%jack daniels%' OR p.name ILIKE '%johnnie walker%'
+            OR p.name ILIKE '%captain morgan%' OR p.name ILIKE '%jose cuervo%' OR p.name ILIKE '%patron%'
+            OR p.name ILIKE '%grey goose%' OR p.name ILIKE '%ciroc%' OR p.name ILIKE '%kahlua%'
+            OR p.name ILIKE '%baileys%' OR p.name ILIKE '%amaretto%' OR p.name ILIKE '%schnapps%'
+            OR p.name ILIKE '%triple sec%' OR p.name ILIKE '%curacao%' OR p.name ILIKE '%vermouth%'
+            OR p.name ILIKE '%absinthe%' OR p.name ILIKE '%aperol%' OR p.name ILIKE '%campari%'
+            -- Ready-to-drink cocktails
+            OR p.name ILIKE '%mojito%' OR p.name ILIKE '%margarita%' OR p.name ILIKE '%daiquiri%'
+            OR p.name ILIKE '%pina colada%' OR p.name ILIKE '%cosmopolitan%' OR p.name ILIKE '%martini%'
+            OR p.name ILIKE '%long island%' OR p.name ILIKE '%bloody mary%' OR p.name ILIKE '%mimosa%'
+            OR p.name ILIKE '%bellini%' OR p.name ILIKE '%paloma%' OR p.name ILIKE '%negroni%'
+            OR p.name ILIKE '%mai tai%' OR p.name ILIKE '%spiked%' OR p.name ILIKE '%hard lemonade%'
+            OR p.name ILIKE '%four loko%' OR p.name ILIKE '%twisted tea%' OR p.name ILIKE '%mike''s hard%'
+            OR p.name ILIKE '%seagram%' OR p.name ILIKE '%soju%' OR p.name ILIKE '%sake%'
+          )
+          -- Exclude non-alcoholic variants
+          AND NOT (
+            p.name ILIKE '%non-alcoholic%' OR p.name ILIKE '%non alcoholic%'
+            OR p.name ILIKE '%alcohol-free%' OR p.name ILIKE '%alcohol free%'
+            OR p.name ILIKE '%0% alcohol%' OR p.name ILIKE '%zero alcohol%'
+            OR p.name ILIKE '%vinegar%' OR p.name ILIKE '%extract%' OR p.name ILIKE '%flavoring%'
+            OR p.name ILIKE '%mixer%' OR p.name ILIKE '% mix %' OR p.name ILIKE '% mix'
+            OR p.name ILIKE '%mocktail%' OR p.name ILIKE '%virgin %'
+          )
+        )
+      )
+    `);
+    return { hasAlcohol: alcoholProducts.length > 0, alcoholProducts };
+  } catch (e) { 
+    console.error("Alcohol check error:", e);
+    return { hasAlcohol: false, alcoholProducts: [] }; 
+  }
+}

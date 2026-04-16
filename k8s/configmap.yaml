@@ -1,0 +1,42 @@
+# =============================================================================
+# ⚙️ KUBERNETES CONFIGMAP — STORESGO BACKEND
+# Non-sensitive configuration values
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: storesgo-backend-config
+  namespace: storesgo-prod
+  labels:
+    app.kubernetes.io/name: storesgo-backend
+    app.kubernetes.io/component: backend
+data:
+  # Application settings
+  NODE_ENV: "production"
+  PORT: "5000"
+  HOST: "0.0.0.0"
+  LOG_LEVEL: "info"
+  
+  # Feature flags
+  METRICS_ENABLED: "true"
+  FEATURE_AI_ENRICHMENT: "true"
+  FEATURE_NOTIFICATIONS: "true"
+  FEATURE_ANALYTICS: "true"
+  FEATURE_CAPTCHA: "true"
+  
+  # CAPTCHA settings
+  CAPTCHA_PROVIDER: "recaptcha"
+  CAPTCHA_ENABLED: "true"
+  CAPTCHA_BYPASS_IN_DEV: "false"
+  
+  # CORS settings
+  CORS_ORIGIN: "https://storesgo.com,https://www.storesgo.com,https://admin.storesgo.com"
+  
+  # Rate limiting
+  RATE_LIMIT_MAX: "100"
+  RATE_LIMIT_WINDOW_MS: "60000"
+  
+  # Sentry environment
+  SENTRY_ENVIRONMENT: "production"
+  SENTRY_TRACES_SAMPLE_RATE: "0.1"
+

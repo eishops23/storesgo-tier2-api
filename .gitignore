@@ -58,3 +58,4 @@ walmart-*-rollback.json
 
 # OS
 Thumbs.db
+data/*.json
